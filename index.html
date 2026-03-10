@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>2D FEM Soft Body - Rust/WebAssembly</title>
+  <link data-trunk rel="css" href="style.css">
+</head>
+<body>
+  <canvas id="canvas" width="600" height="600"></canvas>
+  <div id="info">
+    <b>Space</b> pause | <b>R</b> reset | <span class="rust">Powered by Rust + WebAssembly</span>
+  </div>
+  <div id="status">
+    <div>FPS: <span id="fps">0</span></div>
+    <div>Frame: <span id="frameCount">0</span></div>
+    <div>KE: <span id="kineticEnergy">0</span></div>
+  </div>
+
+  <link data-trunk rel="rust" data-wasm-opt="z" />
+</body>
+</html>

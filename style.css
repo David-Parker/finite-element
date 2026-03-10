@@ -1,0 +1,33 @@
+body {
+  margin: 0;
+  background: #111;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  color: #aaa;
+  font-family: monospace;
+}
+
+canvas {
+  border: 1px solid #333;
+}
+
+#info {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+#status {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 10px;
+  font-size: 12px;
+}
+
+.rust {
+  color: #f74c00;
+}
