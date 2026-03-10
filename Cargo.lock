@@ -25,10 +25,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "fem-softbody"
+name = "fem-core"
+version = "0.1.0"
+
+[[package]]
+name = "fem-web"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "fem-core",
  "js-sys",
  "wasm-bindgen",
  "web-sys",

@@ -2,17 +2,21 @@
 
 # Development server with hot reload
 dev:
-	trunk serve --open
+	cd crates/fem-web && trunk serve --open
 
 # Build for production
 build:
-	trunk build --release
+	cd crates/fem-web && trunk build --release
 
 # Run tests
 test:
+	cargo test -p fem-core
+
+# Run all tests
+test-all:
 	cargo test
 
 # Clean build artifacts
 clean:
 	cargo clean
-	rm -rf dist pkg
+	rm -rf crates/fem-web/dist

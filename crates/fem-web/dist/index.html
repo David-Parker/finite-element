@@ -4,22 +4,23 @@
   <meta charset="utf-8">
   <title>2D FEM Soft Body - Rust/WebAssembly</title>
   <link rel="stylesheet" href="/style-ef088a5ef6ff4eae.css" integrity="sha384-qw2Fosr9Tw9LUJwXWnJqrPKKquRIgnwElBUhxH7eAAdNE8H8NzqYee/MBAdnifss"/>
-<link rel="modulepreload" href="/fem-softbody-d98b109eed2b66b5.js" crossorigin="anonymous" integrity="sha384-DGWUlPQBVczVXYrqeZ9/iBGhJ3VJpkTzsXKQpLFcTzbGzLxtKGG++uYFjOl4Zx+l"><link rel="preload" href="/fem-softbody-d98b109eed2b66b5_bg.wasm" crossorigin="anonymous" integrity="sha384-zNdhYeCh5jFGSI9Z+EUeh7xQiGI51ikxqSURYbOpf8SHmIr94CXtFQOuf9zlmHpR" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/fem-web-d1c200a85ea7df89.js" crossorigin="anonymous" integrity="sha384-9bzqAqVrWNgMntISIxC4YZkWC/pjGqHX6RM/g9xeZkjuMDv70zk7w8WIerbRZPR+"><link rel="preload" href="/fem-web-d1c200a85ea7df89_bg.wasm" crossorigin="anonymous" integrity="sha384-Cl4NvBBOtNkbAg/TaIg5m9BXXFnE5ogMeNnpDDwaFOT3wWiYjmNOAHMEtDjpYlFX" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="canvas" width="600" height="600"></canvas>
   <div id="info">
-    <b>Space</b> pause | <b>R</b> reset | <span class="rust">Powered by Rust + WebAssembly</span>
+    <b>Space</b> pause | <b>R</b> reset | <b>T</b> trace | <span class="rust">Powered by Rust + WebAssembly</span>
   </div>
   <div id="status">
     <div>FPS: <span id="fps">0</span></div>
     <div>Frame: <span id="frameCount">0</span></div>
     <div>KE: <span id="kineticEnergy">0</span></div>
+    <div>Vel: <span id="maxVelocity">0</span> m/s</div>
   </div>
 
   
 <script type="module">
-import init, * as bindings from '/fem-softbody-d98b109eed2b66b5.js';
-const wasm = await init({ module_or_path: '/fem-softbody-d98b109eed2b66b5_bg.wasm' });
+import init, * as bindings from '/fem-web-d1c200a85ea7df89.js';
+const wasm = await init({ module_or_path: '/fem-web-d1c200a85ea7df89_bg.wasm' });
 
 
 window.wasmBindings = bindings;

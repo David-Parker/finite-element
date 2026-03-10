@@ -1,10 +1,7 @@
-//! FEM Soft Body Simulation - Rust/WebAssembly implementation
+//! FEM Soft Body Simulation - Web/WebAssembly application
 
-mod math;
-mod fem;
-mod mesh;
-mod softbody;
 mod renderer;
+mod trace;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -12,37 +9,47 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent};
 
-use crate::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
-use crate::softbody::{SoftBody, Material};
+// Import from the portable core library
+use fem_core::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
+use fem_core::softbody::{SoftBody, Material};
+use fem_core::math;
+use fem_core::fem;
+
 use crate::renderer::Renderer;
+use crate::trace::Tracer;
 
 // Configuration
 const SEGMENTS: u32 = 24;
 const RADIAL_DIVISIONS: u32 = 4;
-const OUTER_RADIUS: f32 = 0.5;
-const INNER_RADIUS: f32 = 0.35;
-const START_HEIGHT: f32 = 0.5;
-const GROUND_Y: f32 = -1.0;
+const OUTER_RADIUS: f32 = 1.5;  // 3m diameter
+const INNER_RADIUS: f32 = 1.0;
+const START_HEIGHT: f32 = 6.0;  // 6m above origin
+const GROUND_Y: f32 = -8.0;     // ground at -8m
 const GRAVITY: f32 = -9.8;
-const SUBSTEPS: u32 = 32;
+const SUBSTEPS: u32 = 64;
+const FIXED_DT: f64 = 1.0 / 60.0;  // Physics runs at 60Hz
+const MAX_FRAME_TIME: f64 = 0.1;   // Cap to prevent spiral of death
 
 fn create_soft_body() -> SoftBody {
     let mut mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
     offset_vertices(&mut mesh.vertices, 0.0, START_HEIGHT);
-    SoftBody::new(&mesh.vertices, &mesh.triangles, Material::RUBBER)
+    SoftBody::new(&mesh.vertices, &mesh.triangles, Material::METAL)
 }
 
 /// Simulation state
 struct Simulation {
     soft_body: SoftBody,
     renderer: Renderer,
+    #[allow(dead_code)]
     triangles: Vec<u32>,
+    #[allow(dead_code)]
     line_indices: Vec<u32>,
     paused: bool,
     frame_count: u32,
     last_update_time: f64,
-    last_frame_slot: u64,
+    accumulator: f64,
     fps: f64,
+    tracer: Tracer,
 }
 
 impl Simulation {
@@ -63,30 +70,40 @@ impl Simulation {
             paused: false,
             frame_count: 0,
             last_update_time: 0.0,
-            last_frame_slot: 0,
+            accumulator: 0.0,
             fps: 0.0,
+            tracer: Tracer::new(),
         })
     }
 
     fn reset(&mut self) {
         self.soft_body = create_soft_body();
         self.frame_count = 0;
+        self.accumulator = 0.0;
     }
 
-    fn update(&mut self) {
+    fn update(&mut self, delta_time: f64) {
         if self.paused {
             return;
         }
 
-        let dt = 1.0 / 60.0 / SUBSTEPS as f32;
+        // Cap delta time to prevent spiral of death after lag spikes
+        let delta_time = delta_time.min(MAX_FRAME_TIME);
+        self.accumulator += delta_time;
 
-        for _ in 0..SUBSTEPS {
-            self.soft_body.substep(dt, GRAVITY);
-            self.soft_body.collide_with_ground(GROUND_Y);
+        // Run fixed timestep physics updates
+        while self.accumulator >= FIXED_DT {
+            let substep_dt = (FIXED_DT / SUBSTEPS as f64) as f32;
+            for _ in 0..SUBSTEPS {
+                self.soft_body.substep(substep_dt, GRAVITY);
+                self.soft_body.collide_with_ground(GROUND_Y);
+            }
+            self.soft_body.sleep_if_resting(100.0);
+
+            self.accumulator -= FIXED_DT;
+            self.frame_count += 1;
+            self.collect_trace();
         }
-        self.soft_body.apply_damping();
-
-        self.frame_count += 1;
     }
 
     fn render(&self) {
@@ -101,6 +118,31 @@ impl Simulation {
 
     fn get_kinetic_energy(&self) -> f32 {
         self.soft_body.get_kinetic_energy()
+    }
+
+    fn get_max_velocity(&self) -> f32 {
+        let (_, _, max_vel, _, _, _) = self.soft_body.get_diagnostics();
+        max_vel
+    }
+
+    fn collect_trace(&mut self) {
+        let ke = self.soft_body.get_kinetic_energy();
+        let (min_j, max_j, max_vel, max_force, min_plastic_det, max_plastic_det) =
+            self.soft_body.get_diagnostics();
+        self.tracer.record(
+            self.frame_count,
+            ke,
+            min_j,
+            max_j,
+            max_vel,
+            max_force,
+            min_plastic_det,
+            max_plastic_det,
+        );
+    }
+
+    fn toggle_tracing(&mut self) {
+        self.tracer.toggle();
     }
 }
 
@@ -134,6 +176,9 @@ pub fn main() -> Result<(), JsValue> {
                     sim.borrow_mut().reset();
                     console::log_1(&"Simulation reset".into());
                 }
+                "t" => {
+                    sim.borrow_mut().toggle_tracing();
+                }
                 _ => {}
             }
         }) as Box<dyn FnMut(_)>);
@@ -151,47 +196,44 @@ pub fn main() -> Result<(), JsValue> {
         let window_clone = window.clone();
         let perf = window.performance().expect("performance should be available");
 
-        const FRAME_TIME: f64 = 1000.0 / 60.0; // 16.67ms
-
         *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
             let now = perf.now();
 
             {
                 let mut sim = sim.borrow_mut();
 
-                // Determine which 60Hz frame slot we're in
-                let current_slot = (now / FRAME_TIME) as u64;
+                // Calculate delta time and FPS
+                let delta_ms = if sim.last_update_time > 0.0 {
+                    now - sim.last_update_time
+                } else {
+                    0.0
+                };
+                let delta_secs = delta_ms / 1000.0;
 
-                // Update once per frame slot
-                if current_slot > sim.last_frame_slot {
-                    // Calculate FPS
-                    if sim.last_update_time > 0.0 {
-                        let delta = now - sim.last_update_time;
-                        if delta > 0.0 {
-                            let instant_fps = 1000.0 / delta;
-                            sim.fps = sim.fps * 0.9 + instant_fps * 0.1;
-                        }
+                if delta_ms > 0.0 {
+                    let instant_fps = 1000.0 / delta_ms;
+                    sim.fps = sim.fps * 0.9 + instant_fps * 0.1;
+                }
+                sim.last_update_time = now;
+
+                sim.update(delta_secs);
+
+                // Update status display
+                if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+                    if let Some(el) = document.get_element_by_id("fps") {
+                        el.set_text_content(Some(&format!("{:.0}", sim.fps)));
                     }
-                    sim.last_update_time = now;
-                    sim.last_frame_slot = current_slot;
-
-                    sim.update();
-
-                    // Update status display
-                    if let Some(document) = web_sys::window().and_then(|w| w.document()) {
-                        if let Some(el) = document.get_element_by_id("fps") {
-                            el.set_text_content(Some(&format!("{:.0}", sim.fps)));
-                        }
-                        if let Some(el) = document.get_element_by_id("frameCount") {
-                            el.set_text_content(Some(&sim.frame_count.to_string()));
-                        }
-                        if let Some(el) = document.get_element_by_id("kineticEnergy") {
-                            el.set_text_content(Some(&format!("{:.4}", sim.get_kinetic_energy())));
-                        }
+                    if let Some(el) = document.get_element_by_id("frameCount") {
+                        el.set_text_content(Some(&sim.frame_count.to_string()));
+                    }
+                    if let Some(el) = document.get_element_by_id("kineticEnergy") {
+                        el.set_text_content(Some(&format!("{:.4}", sim.get_kinetic_energy())));
+                    }
+                    if let Some(el) = document.get_element_by_id("maxVelocity") {
+                        el.set_text_content(Some(&format!("{:.1}", sim.get_max_velocity())));
                     }
                 }
 
-                // Always render (for smooth visuals on high-refresh displays)
                 sim.render();
             }
 
@@ -202,7 +244,7 @@ pub fn main() -> Result<(), JsValue> {
     }
 
     console::log_1(&"FEM Soft Body Simulation (Rust/WebAssembly) started".into());
-    console::log_1(&"Controls: Space = Pause, R = Reset".into());
+    console::log_1(&"Controls: Space = Pause, R = Reset, T = Trace".into());
 
     Ok(())
 }
@@ -218,30 +260,28 @@ fn request_animation_frame(window: &web_sys::Window, f: &Closure<dyn FnMut()>) {
 pub fn run_tests() -> bool {
     console::log_1(&"Running FEM tests...".into());
 
-    // Basic math tests
     let i = math::mat2_identity();
     assert_eq!(i, [1.0, 0.0, 0.0, 1.0]);
-    console::log_1(&"✓ mat2_identity".into());
+    console::log_1(&"  mat2_identity".into());
 
     let det = math::mat2_det(&[2.0, 0.0, 0.0, 3.0]);
     assert!((det - 6.0).abs() < 1e-6);
-    console::log_1(&"✓ mat2_det".into());
+    console::log_1(&"  mat2_det".into());
 
-    // FEM tests
     let area = fem::compute_triangle_area(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
     assert!((area - 0.5).abs() < 1e-6);
-    console::log_1(&"✓ triangle_area".into());
+    console::log_1(&"  triangle_area".into());
 
     let f = math::mat2_identity();
     let energy = fem::compute_neo_hookean_energy(&f, 1.0, 1000.0, 2000.0);
     assert!(energy.abs() < 1e-6);
-    console::log_1(&"✓ neo_hookean_energy_at_rest".into());
+    console::log_1(&"  neo_hookean_energy_at_rest".into());
 
     let p = fem::compute_neo_hookean_stress(&f, 1.0, 1000.0, 2000.0);
     for val in &p {
         assert!(val.abs() < 1e-6);
     }
-    console::log_1(&"✓ neo_hookean_stress_at_rest".into());
+    console::log_1(&"  neo_hookean_stress_at_rest".into());
 
     console::log_1(&"All tests passed!".into());
     true

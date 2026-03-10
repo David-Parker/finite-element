@@ -146,4 +146,22 @@ mod tests {
         assert_eq!(mesh.vertices.len() / 2, 25); // 5x5 vertices
         assert_eq!(mesh.triangles.len() / 3, 32); // 4x4x2 triangles
     }
+
+    #[test]
+    fn test_ring_wireframe() {
+        let wireframe = create_ring_wireframe(8, 2);
+        // Each segment has: inner edge, radial edge, diagonal edge
+        // Plus outer edges on last ring
+        // 8 segments * 2 radial divisions * 3 edges + 8 outer edges = 56 edges
+        // Each edge is 2 indices
+        assert!(wireframe.len() > 0);
+        assert_eq!(wireframe.len() % 2, 0); // Must be pairs
+    }
+
+    #[test]
+    fn test_offset_vertices() {
+        let mut vertices = vec![0.0, 0.0, 1.0, 1.0];
+        offset_vertices(&mut vertices, 2.0, 3.0);
+        assert_eq!(vertices, vec![2.0, 3.0, 3.0, 4.0]);
+    }
 }

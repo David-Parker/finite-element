@@ -4,9 +4,58 @@ This document describes the mathematical model and equations used in this 2D sof
 
 ## Overview
 
-The simulation uses a **Neo-Hookean hyperelastic material model** with explicit time integration. This model is well-suited for large deformations of soft materials like rubber, jello, and biological tissues.
+This simulation combines two key components:
 
-## Material Parameters
+1. **Finite Element Method (FEM)**: The spatial discretization approach
+2. **Neo-Hookean Hyperelastic Model**: The constitutive law (material behavior)
+
+Together, these provide a physically-based simulation suitable for large deformations of soft materials like rubber, jello, and biological tissues.
+
+## Finite Element Method (FEM)
+
+FEM is a numerical technique for solving partial differential equations by discretizing a continuous domain into smaller "finite elements."
+
+### Why FEM?
+
+Instead of solving the equations of elasticity over a continuous body (impossible analytically for complex shapes), we:
+
+1. **Discretize**: Divide the body into simple elements (triangles in 2D, tetrahedra in 3D)
+2. **Approximate**: Assume deformation varies linearly within each element
+3. **Compute locally**: Calculate forces for each element independently
+4. **Assemble globally**: Combine element contributions at shared nodes
+
+### Elements and Nodes
+
+- **Elements**: The triangles that make up the mesh. Each element has its own deformation state.
+- **Nodes**: The vertices where elements connect. Forces from adjacent elements accumulate here.
+
+### FEM Workflow (Per Timestep)
+
+```
+For each element (triangle):
+    1. Compute deformation gradient F from current node positions
+    2. Evaluate constitutive model (Neo-Hookean) to get stress P
+    3. Convert stress to nodal forces
+    4. Accumulate forces at shared nodes
+
+For each node (vertex):
+    1. Sum forces from all adjacent elements
+    2. Add external forces (gravity)
+    3. Integrate velocity and position
+```
+
+This separation of local (element) and global (node) computation is the essence of FEM.
+
+## Constitutive Model: Neo-Hookean Hyperelasticity
+
+The constitutive model defines the relationship between deformation and internal stress. We use the **Neo-Hookean hyperelastic model**, which is:
+
+- **Hyperelastic**: Stress derived from a strain energy function (path-independent, energy-conserving)
+- **Neo-Hookean**: A specific energy function suitable for large deformations
+
+This model is well-suited for rubber-like materials and provides stable behavior under large stretching and compression.
+
+## Material Parameters (Constitutive Model Inputs)
 
 ### Input Parameters
 
@@ -24,9 +73,9 @@ The input parameters are converted to Lamé parameters for the constitutive mode
 λ = Eν / ((1 + ν)(1 - 2ν))   # First Lamé parameter
 ```
 
-## Deformation Gradient
+## Deformation Gradient (FEM Kinematics)
 
-For each triangle element, we compute the **deformation gradient F**, which describes how the material has deformed from its rest state.
+For each triangle element, we compute the **deformation gradient F**, which describes how the material has deformed from its rest state. This is the key quantity that connects the FEM discretization to the constitutive model.
 
 ### Rest Shape Matrix (Dm)
 
@@ -58,7 +107,7 @@ The determinant J = det(F) represents the volume ratio (area ratio in 2D):
 - J < 1: Compression
 - J ≤ 0: Inverted element (numerical instability)
 
-## Neo-Hookean Model
+## Neo-Hookean Model (Constitutive Equations)
 
 ### Strain Energy Density
 
@@ -87,7 +136,9 @@ Where F⁻ᵀ is the inverse transpose of F.
 
 At rest (F = I, J = 1), the stress is zero (no internal forces).
 
-## Force Computation
+## Force Computation (FEM Assembly)
+
+This is where FEM and the constitutive model come together: stress from Neo-Hookean is converted to nodal forces using FEM shape function derivatives.
 
 ### Elastic Forces
 
@@ -130,7 +181,7 @@ Note: velocity is updated first, then position uses the new velocity. This provi
 
 ### Substeps
 
-Each frame is divided into multiple substeps (default: 32) for stability:
+Each frame is divided into multiple substeps (default: 128) for stability:
 
 ```
 dt_substep = (1/60) / num_substeps
@@ -163,29 +214,131 @@ Triangle mass is distributed equally to its three vertices:
 vertex_mass += (triangle_area · density) / 3
 ```
 
+## Plasticity (Permanent Deformation)
+
+For materials like wood, deformation can become permanent when stress exceeds a threshold. This is modeled using **multiplicative plasticity** with a plastic deformation gradient.
+
+### Elastic vs Plastic Materials
+
+- **Elastic (rubber, jello, metal)**: Always returns to rest shape. `yield_stress = 0`
+- **Plastic (wood)**: Permanent deformation when overstressed. `yield_stress > 0`
+
+Note: Metal uses high damping instead of plasticity for stability reasons (see Limitations below).
+
+### Material Parameters
+
+- **yield_stress**: Stress threshold before plastic flow begins (Pa)
+- **plasticity**: Rate at which deformation becomes permanent (0-1)
+
+### Multiplicative Plasticity Model
+
+We use a multiplicative decomposition of the deformation gradient, common in finite strain plasticity:
+
+```
+F_total = F_elastic · F_plastic
+```
+
+Each triangle tracks a plastic deformation matrix `Fp` (initialized to identity).
+
+#### Algorithm
+
+1. Compute total deformation gradient:
+   ```
+   F_total = Ds · Dm⁻¹
+   ```
+
+2. Extract elastic deformation by removing plastic part:
+   ```
+   F_elastic = F_total · Fp⁻¹
+   ```
+
+3. Compute stress from elastic deformation only (Neo-Hookean):
+   ```
+   P = μ·F_elastic + (λ·log(J_elastic) - μ)·F_elastic⁻ᵀ
+   ```
+
+4. Check yield condition (Frobenius norm of stress):
+   ```
+   if ||P|| > yield_stress:
+       # Plastic flow - update Fp towards F_total
+       Fp_new = lerp(Fp, F_total, plasticity · yield_ratio · rate)
+   ```
+
+5. Apply conservative limits to prevent instability:
+   - Only yield when triangle is healthy: `0.7 < J_total < 1.5`
+   - Limit plastic deformation: `0.85 < det(Fp) < 1.15`
+   - Very slow plastic flow rate: `rate = 0.02`
+
+### Effect on Behavior
+
+| Material | yield_stress | plasticity | Behavior |
+|----------|-------------|------------|----------|
+| Rubber   | 0           | 0          | Soft, bouncy, always recovers |
+| Jello    | 0           | 0          | Very soft, jiggly |
+| Wood     | 2e4         | 0.2        | Can bend/deform permanently |
+| Metal    | 0           | 0          | Stiff, high damping (no bounce) |
+
+### Limitations
+
+The multiplicative plasticity model has stability constraints:
+
+1. **High-stress impacts**: During violent collisions, triangles can deform faster than plastic flow can accommodate, leading to numerical instability. For this reason, metal uses high damping instead of plasticity.
+
+2. **Conservative limits**: The tight bounds on `det(Fp)` (0.85-1.15) limit the amount of permanent deformation possible, but are necessary for stability.
+
+3. **No fracture**: The model allows plastic deformation but not material separation/tearing.
+
 ## Numerical Stability
+
+### Compression Barrier
+
+To prevent triangle inversion, a barrier force is added when triangles become compressed:
+
+```
+if J < 0.8:
+    compression = 0.8 - J
+    barrier = compression³ · 500 · μ
+    # Barrier is added to stress, pushing triangle back towards healthy state
+```
+
+This cubic scaling provides aggressive resistance as J approaches zero.
 
 ### J Clamping
 
-To prevent numerical issues when elements become inverted:
+As a fallback, J is clamped when computing stress:
 
 ```
-safe_J = max(J, 0.1)
+safe_J = max(J, 0.4)
 ```
 
 This prevents log(J) from going to -infinity.
 
-### Material Selection
+### Velocity and Acceleration Limits
 
-Stiffer materials require either:
-- More substeps (smaller dt)
-- Lower stiffness values
-- Implicit integration (not implemented)
+Safety limits prevent numerical explosion:
 
-Typical stable ranges for 32 substeps at 60 FPS:
-- Rubber/Jello: E = 1e5 to 5e5
-- Wood: E = 1e6
-- Metal: May require 64+ substeps
+```
+MAX_VELOCITY = 30.0
+MAX_ACCEL = 5000.0
+```
+
+### Substep Requirements
+
+The simulation uses 128 substeps per frame (dt ≈ 0.00013s) for stability with stiffer materials.
+
+Typical stable material stiffness ranges:
+- Jello: E = 5e4
+- Rubber: E = 1e5
+- Wood: E = 2e5
+- Metal: E = 4e5
+
+### Stability Testing
+
+The codebase includes end-to-end simulation tests (`simulation_tests.rs`) that verify:
+- KE stays below 100,000
+- Velocity stays below 60
+- J stays between 0.1 and 10.0
+- All materials survive 10-second simulations
 
 ## References
 

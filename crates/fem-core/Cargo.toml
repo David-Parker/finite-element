@@ -1,0 +1,15 @@
+[package]
+name = "fem-core"
+version = "0.1.0"
+edition = "2021"
+description = "Portable FEM soft body physics library"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+simd = []  # Future: WASM SIMD support
+
+[dev-dependencies]
+# For testing only

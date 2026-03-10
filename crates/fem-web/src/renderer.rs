@@ -21,7 +21,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(gl: GL) -> Result<Self, JsValue> {
-        let view_size = 2.0;
+        let view_size = 10.0;
         let scale = 1.0 / view_size;
 
         // Create shaders

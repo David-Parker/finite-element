@@ -170,4 +170,79 @@ mod tests {
         assert_mat2_close(&mat2_mul(&i, &a), &a, "I * A = A");
         assert_mat2_close(&mat2_mul(&a, &i), &a, "A * I = A");
     }
+
+    #[test]
+    fn test_mat2_transpose() {
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let at = mat2_transpose(&a);
+        assert_mat2_close(&at, &[1.0, 3.0, 2.0, 4.0], "transpose");
+        // Double transpose = original
+        assert_mat2_close(&mat2_transpose(&at), &a, "double transpose");
+    }
+
+    #[test]
+    fn test_mat2_inv_transpose() {
+        let a = [3.0, 1.0, 2.0, 4.0];
+        let a_inv_t = mat2_inv_transpose(&a);
+        // inv_transpose = transpose(inv) = inv(transpose)
+        let a_inv = mat2_inv(&a);
+        let a_inv_then_t = mat2_transpose(&a_inv);
+        assert_mat2_close(&a_inv_t, &a_inv_then_t, "inv_transpose = transpose(inv)");
+    }
+
+    #[test]
+    fn test_mat2_add_sub() {
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [5.0, 6.0, 7.0, 8.0];
+        assert_mat2_close(&mat2_add(&a, &b), &[6.0, 8.0, 10.0, 12.0], "add");
+        assert_mat2_close(&mat2_sub(&a, &b), &[-4.0, -4.0, -4.0, -4.0], "sub");
+    }
+
+    #[test]
+    fn test_mat2_scale() {
+        let a = [1.0, 2.0, 3.0, 4.0];
+        assert_mat2_close(&mat2_scale(&a, 2.0), &[2.0, 4.0, 6.0, 8.0], "scale");
+    }
+
+    #[test]
+    fn test_mat2_trace() {
+        assert_close(mat2_trace(&mat2_identity()), 2.0, "trace(I)");
+        assert_close(mat2_trace(&[3.0, 1.0, 2.0, 5.0]), 8.0, "trace");
+    }
+
+    #[test]
+    fn test_mat2_frobenius_norm_sq() {
+        assert_close(mat2_frobenius_norm_sq(&mat2_identity()), 2.0, "frobenius(I)");
+        assert_close(mat2_frobenius_norm_sq(&[1.0, 2.0, 3.0, 4.0]), 30.0, "frobenius");
+    }
+
+    #[test]
+    fn test_mat2_mul_vec() {
+        let m = [1.0, 2.0, 3.0, 4.0];
+        let v = [1.0, 1.0];
+        let result = mat2_mul_vec(&m, &v);
+        assert_close(result[0], 4.0, "mul_vec[0]");
+        assert_close(result[1], 6.0, "mul_vec[1]");
+    }
+
+    #[test]
+    fn test_vec2_ops() {
+        let a = [3.0, 4.0];
+        let b = [1.0, 2.0];
+
+        assert_close(vec2_length(&a), 5.0, "length");
+        assert_close(vec2_dot(&a, &b), 11.0, "dot");
+
+        let sum = vec2_add(&a, &b);
+        assert_close(sum[0], 4.0, "add[0]");
+        assert_close(sum[1], 6.0, "add[1]");
+
+        let diff = vec2_sub(&a, &b);
+        assert_close(diff[0], 2.0, "sub[0]");
+        assert_close(diff[1], 2.0, "sub[1]");
+
+        let scaled = vec2_scale(&a, 2.0);
+        assert_close(scaled[0], 6.0, "scale[0]");
+        assert_close(scaled[1], 8.0, "scale[1]");
+    }
 }

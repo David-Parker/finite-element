@@ -15,6 +15,7 @@ pub struct LameParams {
 pub struct TriangleData {
     pub rest_dm_inv: Mat2,  // Inverse of rest shape matrix
     pub rest_area: f32,     // Rest area
+    pub plastic_def: Mat2,  // Plastic deformation (starts as identity)
 }
 
 /// Forces on triangle vertices
@@ -93,16 +94,27 @@ pub fn compute_neo_hookean_energy(f: &Mat2, j: f32, mu: f32, lambda: f32) -> f32
 
 /// Compute Neo-Hookean first Piola-Kirchhoff stress tensor P
 /// P = μF + (λ log(J) - μ) F^(-T)
+/// With barrier to prevent triangle inversion
 pub fn compute_neo_hookean_stress(f: &Mat2, j: f32, mu: f32, lambda: f32) -> Mat2 {
     // Clamp J to prevent numerical issues
-    let safe_j = j.max(0.1);
+    let safe_j = j.max(0.4);
     let log_j = safe_j.ln();
 
     let f_inv_t = mat2_inv_transpose(f);
 
     // P = μF + (λ log(J) - μ) F^(-T)
     let term1 = mat2_scale(f, mu);
-    let coeff = lambda * log_j - mu;
+    let mut coeff = lambda * log_j - mu;
+
+    // Add very strong repulsion when triangle is getting compressed
+    // This acts as a barrier to prevent inversion
+    // Kicks in at j < 0.8 with cubic scaling for aggressive response
+    if j < 0.8 {
+        let compression = 0.8 - j;
+        let barrier = compression * compression * compression * 500.0 * mu;
+        coeff -= barrier;
+    }
+
     let term2 = mat2_scale(&f_inv_t, coeff);
     mat2_add(&term1, &term2)
 }
@@ -135,7 +147,25 @@ pub fn compute_triangle_area(
     cross.abs() * 0.5
 }
 
+/// Compute precomputed triangle data from vertex positions
+pub fn compute_triangle_data(
+    x0: f32, y0: f32,
+    x1: f32, y1: f32,
+    x2: f32, y2: f32,
+) -> TriangleData {
+    let dm = compute_rest_shape_matrix(x0, y0, x1, y1, x2, y2);
+    let rest_dm_inv = mat2_inv(&dm);
+    let rest_area = compute_triangle_area(x0, y0, x1, y1, x2, y2);
+
+    TriangleData {
+        rest_dm_inv,
+        rest_area,
+        plastic_def: mat2_identity(),
+    }
+}
+
 /// Compute all forces for a single triangle - main FEM computation
+/// Now with plasticity support: uses plastic_def to compute elastic deformation
 pub fn compute_triangle_forces(
     tri: &TriangleData,
     x0: f32, y0: f32,
@@ -147,19 +177,23 @@ pub fn compute_triangle_forces(
     // Step 1: Deformed shape matrix
     let ds = compute_deformed_shape_matrix(x0, y0, x1, y1, x2, y2);
 
-    // Step 2: Deformation gradient
-    let f = compute_deformation_gradient(&ds, &tri.rest_dm_inv);
+    // Step 2: Total deformation gradient
+    let f_total = compute_deformation_gradient(&ds, &tri.rest_dm_inv);
 
-    // Step 3: Volume ratio
+    // Step 3: Elastic deformation (remove plastic part): Fe = F * Fp^(-1)
+    let fp_inv = mat2_inv(&tri.plastic_def);
+    let f = mat2_mul(&f_total, &fp_inv);
+
+    // Step 4: Volume ratio (of elastic deformation)
     let j = compute_volume_ratio(&f);
 
-    // Step 4: Stress
+    // Step 5: Stress
     let p = compute_neo_hookean_stress(&f, j, mu, lambda);
 
-    // Step 5: Forces
+    // Step 6: Forces
     let forces = compute_elastic_forces(&p, &tri.rest_dm_inv, tri.rest_area);
 
-    // Step 6: Energy
+    // Step 7: Energy
     let energy = compute_neo_hookean_energy(&f, j, mu, lambda);
 
     TriangleForceResult {
@@ -169,6 +203,25 @@ pub fn compute_triangle_forces(
         j,
         energy,
     }
+}
+
+/// Compute stress magnitude (Frobenius norm) for yield checking
+pub fn compute_stress_magnitude(
+    tri: &TriangleData,
+    x0: f32, y0: f32,
+    x1: f32, y1: f32,
+    x2: f32, y2: f32,
+    mu: f32,
+    lambda: f32,
+) -> (f32, Mat2) {
+    let ds = compute_deformed_shape_matrix(x0, y0, x1, y1, x2, y2);
+    let f_total = compute_deformation_gradient(&ds, &tri.rest_dm_inv);
+    let fp_inv = mat2_inv(&tri.plastic_def);
+    let f = mat2_mul(&f_total, &fp_inv);
+    let j = compute_volume_ratio(&f);
+    let p = compute_neo_hookean_stress(&f, j, mu, lambda);
+    let stress_mag = mat2_frobenius_norm_sq(&p).sqrt();
+    (stress_mag, f_total)
 }
 
 #[cfg(test)]
@@ -220,5 +273,64 @@ mod tests {
 
         assert_close(sum_x, 0.0, "force sum X");
         assert_close(sum_y, 0.0, "force sum Y");
+    }
+
+    #[test]
+    fn test_shape_matrix() {
+        // Triangle: (0,0), (1,0), (0,1)
+        let dm = compute_rest_shape_matrix(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        // Dm = [x1-x0, y1-y0, x2-x0, y2-y0] = [1, 0, 0, 1]
+        assert_close(dm[0], 1.0, "dm[0]");
+        assert_close(dm[1], 0.0, "dm[1]");
+        assert_close(dm[2], 0.0, "dm[2]");
+        assert_close(dm[3], 1.0, "dm[3]");
+    }
+
+    #[test]
+    fn test_deformation_gradient_identity() {
+        // Same rest and deformed shape = identity deformation gradient
+        let dm = compute_rest_shape_matrix(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        let dm_inv = mat2_inv(&dm);
+        let ds = compute_deformed_shape_matrix(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        let f = compute_deformation_gradient(&ds, &dm_inv);
+
+        assert_close(f[0], 1.0, "F[0]");
+        assert_close(f[1], 0.0, "F[1]");
+        assert_close(f[2], 0.0, "F[2]");
+        assert_close(f[3], 1.0, "F[3]");
+    }
+
+    #[test]
+    fn test_volume_ratio() {
+        let f_identity = mat2_identity();
+        assert_close(compute_volume_ratio(&f_identity), 1.0, "J at rest");
+
+        // Uniform scaling by 2 = area ratio of 4
+        let f_scaled = [2.0, 0.0, 0.0, 2.0];
+        assert_close(compute_volume_ratio(&f_scaled), 4.0, "J scaled 2x");
+    }
+
+    #[test]
+    fn test_triangle_forces_at_rest() {
+        // Triangle at rest should have zero forces
+        let dm = compute_rest_shape_matrix(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        let tri_data = TriangleData {
+            rest_dm_inv: mat2_inv(&dm),
+            rest_area: 0.5,
+            plastic_def: mat2_identity(),
+        };
+
+        let result = compute_triangle_forces(
+            &tri_data,
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+            1000.0, 2000.0,
+        );
+
+        assert_close(result.f0[0], 0.0, "f0.x at rest");
+        assert_close(result.f0[1], 0.0, "f0.y at rest");
+        assert_close(result.f1[0], 0.0, "f1.x at rest");
+        assert_close(result.f1[1], 0.0, "f1.y at rest");
+        assert_close(result.j, 1.0, "J at rest");
+        assert_close(result.energy, 0.0, "energy at rest");
     }
 }
