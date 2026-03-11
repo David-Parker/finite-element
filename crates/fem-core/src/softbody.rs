@@ -25,40 +25,44 @@ pub struct Material {
 }
 
 impl Material {
+    // Softest - jiggly, bouncy
+    pub const JELLO: Material = Material {
+        young_modulus: 2e5,       // Softest
+        poisson_ratio: 0.45,      // Nearly incompressible
+        density: 1000.0,
+        damping: 300.0,           // Lower damping for more jiggle
+        yield_stress: 0.0,
+        plasticity: 0.0,
+    };
+
+    // Soft, elastic, bouncy
     pub const RUBBER: Material = Material {
-        young_modulus: 5e4,
+        young_modulus: 6e5,       // 3x stiffer than jello
         poisson_ratio: 0.45,
         density: 1100.0,
-        damping: 50.0,
+        damping: 500.0,
         yield_stress: 0.0,
         plasticity: 0.0,
     };
 
+    // Medium stiffness, less bounce
     pub const WOOD: Material = Material {
-        young_modulus: 1e5,
+        young_modulus: 1.5e6,     // 2.5x stiffer than rubber
         poisson_ratio: 0.3,
         density: 600.0,
-        damping: 100.0,
-        yield_stress: 0.0,        // Disabled for stability
-        plasticity: 0.0,
-    };
-
-    pub const METAL: Material = Material {
-        young_modulus: 2e6,       // Stiff but stable
-        poisson_ratio: 0.3,
-        density: 2000.0,
-        damping: 3000.0,          // Very high damping
-        yield_stress: 1e6,        // Yields under high stress
-        plasticity: 0.5,          // Permanent deformation
-    };
-
-    pub const JELLO: Material = Material {
-        young_modulus: 3e4,
-        poisson_ratio: 0.4,
-        density: 1000.0,
-        damping: 100.0,
+        damping: 1000.0,
         yield_stress: 0.0,
         plasticity: 0.0,
+    };
+
+    // Stiff, minimal deformation, can yield permanently
+    pub const METAL: Material = Material {
+        young_modulus: 5e6,       // 3.3x stiffer than wood
+        poisson_ratio: 0.3,
+        density: 2000.0,
+        damping: 4000.0,
+        yield_stress: 3e6,
+        plasticity: 0.3,
     };
 }
 
@@ -335,20 +339,23 @@ impl SoftBody {
     }
 
     /// Perform one physics substep
-    pub fn substep(&mut self, dt: f32, gravity: f32) -> ForceStats {
+    /// Returns (ForceStats, strain_corrections)
+    pub fn substep(&mut self, dt: f32, gravity: f32) -> (ForceStats, u32) {
         let stats = self.compute_all_forces();
         self.apply_gravity(gravity);
         self.apply_internal_damping();
         self.integrate(dt);
-        self.limit_strain();
-        stats
+        let corrections = self.limit_strain();
+        (stats, corrections)
     }
 
     /// Limit strain to prevent triangle inversion
     /// Uses position-based correction for stability
-    fn limit_strain(&mut self) {
-        const MIN_J: f32 = 0.3;  // Minimum allowed volume ratio
-        const MAX_J: f32 = 2.5;  // Maximum allowed volume ratio
+    /// Returns count of triangles that were corrected
+    fn limit_strain(&mut self) -> u32 {
+        const MIN_J: f32 = 0.6;  // Minimum allowed volume ratio (prevent inversion)
+        const MAX_J: f32 = 1.2;  // Maximum allowed volume ratio (prevent pancaking)
+        let mut corrections = 0u32;
 
         for t in 0..self.num_tris {
             let i0 = self.triangles[t * 3] as usize;
@@ -370,6 +377,7 @@ impl SoftBody {
 
             // If triangle is too compressed or inverted, push vertices apart
             if j < MIN_J {
+                corrections += 1;
                 let center_x = (x0 + x1 + x2) / 3.0;
                 let center_y = (y0 + y1 + y2) / 3.0;
 
@@ -384,20 +392,21 @@ impl SoftBody {
                 self.pos[i2 * 2] = center_x + (x2 - center_x) * scale;
                 self.pos[i2 * 2 + 1] = center_y + (y2 - center_y) * scale;
 
-                // Damp velocities to prevent oscillation
-                self.vel[i0 * 2] *= 0.8;
-                self.vel[i0 * 2 + 1] *= 0.8;
-                self.vel[i1 * 2] *= 0.8;
-                self.vel[i1 * 2 + 1] *= 0.8;
-                self.vel[i2 * 2] *= 0.8;
-                self.vel[i2 * 2 + 1] *= 0.8;
+                // Damp velocities to prevent oscillation (gentle to avoid killing freefall)
+                self.vel[i0 * 2] *= 0.98;
+                self.vel[i0 * 2 + 1] *= 0.98;
+                self.vel[i1 * 2] *= 0.98;
+                self.vel[i1 * 2 + 1] *= 0.98;
+                self.vel[i2 * 2] *= 0.98;
+                self.vel[i2 * 2 + 1] *= 0.98;
             }
             // If triangle is too stretched, pull vertices together
             else if j > MAX_J {
+                corrections += 1;
                 let center_x = (x0 + x1 + x2) / 3.0;
                 let center_y = (y0 + y1 + y2) / 3.0;
 
-                let scale = (MAX_J / j).sqrt().max(0.7);
+                let scale = (MAX_J / j).sqrt().max(0.8);
 
                 self.pos[i0 * 2] = center_x + (x0 - center_x) * scale;
                 self.pos[i0 * 2 + 1] = center_y + (y0 - center_y) * scale;
@@ -405,8 +414,26 @@ impl SoftBody {
                 self.pos[i1 * 2 + 1] = center_y + (y1 - center_y) * scale;
                 self.pos[i2 * 2] = center_x + (x2 - center_x) * scale;
                 self.pos[i2 * 2 + 1] = center_y + (y2 - center_y) * scale;
+
+                // Also damp outward velocity to help settle
+                self.vel[i0 * 2] *= 0.95;
+                self.vel[i0 * 2 + 1] *= 0.95;
+                self.vel[i1 * 2] *= 0.95;
+                self.vel[i1 * 2 + 1] *= 0.95;
+                self.vel[i2 * 2] *= 0.95;
+                self.vel[i2 * 2 + 1] *= 0.95;
             }
         }
+        corrections
+    }
+
+    /// Get lowest Y position of any vertex
+    pub fn get_lowest_y(&self) -> f32 {
+        let mut lowest = f32::INFINITY;
+        for i in 0..self.num_verts {
+            lowest = lowest.min(self.pos[i * 2 + 1]);
+        }
+        lowest
     }
 
     /// Get total kinetic energy

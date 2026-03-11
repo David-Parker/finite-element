@@ -19,7 +19,7 @@ use crate::renderer::Renderer;
 use crate::trace::Tracer;
 
 // Configuration
-const SEGMENTS: u32 = 24;
+const SEGMENTS: u32 = 32;
 const RADIAL_DIVISIONS: u32 = 4;
 const OUTER_RADIUS: f32 = 1.5;  // 3m diameter
 const INNER_RADIUS: f32 = 1.0;
@@ -30,10 +30,25 @@ const SUBSTEPS: u32 = 64;
 const FIXED_DT: f64 = 1.0 / 60.0;  // Physics runs at 60Hz
 const MAX_FRAME_TIME: f64 = 0.1;   // Cap to prevent spiral of death
 
-fn create_soft_body() -> SoftBody {
+fn create_soft_body(material: Material) -> SoftBody {
     let mut mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
     offset_vertices(&mut mesh.vertices, 0.0, START_HEIGHT);
-    SoftBody::new(&mesh.vertices, &mesh.triangles, Material::METAL)
+    SoftBody::new(&mesh.vertices, &mesh.triangles, material)
+}
+
+fn material_name(material: Material) -> &'static str {
+    // Compare by young_modulus since we can't derive PartialEq easily
+    if material.young_modulus == Material::JELLO.young_modulus {
+        "JELLO"
+    } else if material.young_modulus == Material::RUBBER.young_modulus {
+        "RUBBER"
+    } else if material.young_modulus == Material::WOOD.young_modulus {
+        "WOOD"
+    } else if material.young_modulus == Material::METAL.young_modulus {
+        "METAL"
+    } else {
+        "UNKNOWN"
+    }
 }
 
 /// Simulation state
@@ -50,11 +65,13 @@ struct Simulation {
     accumulator: f64,
     fps: f64,
     tracer: Tracer,
+    current_material: Material,
 }
 
 impl Simulation {
     fn new(gl: WebGlRenderingContext) -> Result<Self, JsValue> {
-        let soft_body = create_soft_body();
+        let current_material = Material::RUBBER;
+        let soft_body = create_soft_body(current_material);
         let mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
         let line_indices = create_ring_wireframe(SEGMENTS, RADIAL_DIVISIONS);
 
@@ -73,13 +90,24 @@ impl Simulation {
             accumulator: 0.0,
             fps: 0.0,
             tracer: Tracer::new(),
+            current_material,
         })
     }
 
     fn reset(&mut self) {
-        self.soft_body = create_soft_body();
+        self.soft_body = create_soft_body(self.current_material);
         self.frame_count = 0;
         self.accumulator = 0.0;
+    }
+
+    fn set_material(&mut self, material: Material) {
+        self.current_material = material;
+        self.reset();
+        console::log_1(&format!("Material: {}", material_name(material)).into());
+    }
+
+    fn get_material_name(&self) -> &'static str {
+        material_name(self.current_material)
     }
 
     fn update(&mut self, delta_time: f64) {
@@ -94,11 +122,39 @@ impl Simulation {
         // Run fixed timestep physics updates
         while self.accumulator >= FIXED_DT {
             let substep_dt = (FIXED_DT / SUBSTEPS as f64) as f32;
+
+            // Debug: log state before substeps
+            if self.frame_count < 5 {
+                let ke_before = self.soft_body.get_kinetic_energy();
+                let (_, _, max_vel, _, _, _) = self.soft_body.get_diagnostics();
+                console::log_1(&format!(
+                    "Frame {}: KE={:.2}, maxVel={:.2}, dt={:.6}",
+                    self.frame_count, ke_before, max_vel, substep_dt
+                ).into());
+            }
+
+            let mut total_corrections = 0u32;
             for _ in 0..SUBSTEPS {
-                self.soft_body.substep(substep_dt, GRAVITY);
+                let (_, corrections) = self.soft_body.substep(substep_dt, GRAVITY);
+                total_corrections += corrections;
                 self.soft_body.collide_with_ground(GROUND_Y);
             }
-            self.soft_body.sleep_if_resting(100.0);
+
+            // Debug: log state after substeps
+            if self.frame_count < 5 {
+                let ke_after = self.soft_body.get_kinetic_energy();
+                let (min_j, max_j, max_vel, _, _, _) = self.soft_body.get_diagnostics();
+                console::log_1(&format!(
+                    "  After: KE={:.2}, maxVel={:.2}, J=[{:.2},{:.2}], strain_corrections={}",
+                    ke_after, max_vel, min_j, max_j, total_corrections
+                ).into());
+            }
+
+            // Only sleep if object is on the ground and has very low energy
+            let lowest_y = self.soft_body.get_lowest_y();
+            if lowest_y < GROUND_Y + 0.1 {
+                self.soft_body.sleep_if_resting(1.0);  // Much lower threshold
+            }
 
             self.accumulator -= FIXED_DT;
             self.frame_count += 1;
@@ -179,6 +235,18 @@ pub fn main() -> Result<(), JsValue> {
                 "t" => {
                     sim.borrow_mut().toggle_tracing();
                 }
+                "1" => {
+                    sim.borrow_mut().set_material(Material::JELLO);
+                }
+                "2" => {
+                    sim.borrow_mut().set_material(Material::RUBBER);
+                }
+                "3" => {
+                    sim.borrow_mut().set_material(Material::WOOD);
+                }
+                "4" => {
+                    sim.borrow_mut().set_material(Material::METAL);
+                }
                 _ => {}
             }
         }) as Box<dyn FnMut(_)>);
@@ -220,6 +288,9 @@ pub fn main() -> Result<(), JsValue> {
 
                 // Update status display
                 if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+                    if let Some(el) = document.get_element_by_id("material") {
+                        el.set_text_content(Some(sim.get_material_name()));
+                    }
                     if let Some(el) = document.get_element_by_id("fps") {
                         el.set_text_content(Some(&format!("{:.0}", sim.fps)));
                     }
