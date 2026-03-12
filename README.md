@@ -2,6 +2,8 @@
 
 A real-time soft body physics simulation using the Finite Element Method (FEM) with Neo-Hookean hyperelastic materials, written in Rust and compiled to WebAssembly.
 
+![Collisions](media/collisions.gif)
+
 ![FEM Soft Body Simulation](media/fem.gif)
 
 ## Features
