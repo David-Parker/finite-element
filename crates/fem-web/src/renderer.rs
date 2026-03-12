@@ -111,6 +111,10 @@ impl Renderer {
     }
 
     pub fn render(&self, positions: &[f32]) {
+        self.render_bodies(&[positions], &[(0.4, 0.8, 1.0)]);
+    }
+
+    pub fn render_bodies(&self, bodies: &[&[f32]], colors: &[(f32, f32, f32)]) {
         let gl = &self.gl;
 
         gl.clear_color(0.07, 0.07, 0.07, 1.0);
@@ -123,23 +127,28 @@ impl Renderer {
         gl.uniform3f(Some(&self.u_color), 0.5, 0.5, 0.5);
         gl.draw_arrays(GL::LINES, 0, 2);
 
-        // Upload current positions
-        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.vertex_buffer));
-        unsafe {
-            let array = js_sys::Float32Array::view(positions);
-            gl.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &array, GL::DYNAMIC_DRAW);
+        // Draw each body
+        for (i, positions) in bodies.iter().enumerate() {
+            let (r, g, b) = colors.get(i).copied().unwrap_or((0.4, 0.8, 1.0));
+
+            // Upload current positions
+            gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.vertex_buffer));
+            unsafe {
+                let array = js_sys::Float32Array::view(positions);
+                gl.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &array, GL::DYNAMIC_DRAW);
+            }
+            gl.vertex_attrib_pointer_with_i32(self.a_position, 2, GL::FLOAT, false, 0, 0);
+
+            // Draw filled triangles (darker version of color)
+            gl.uniform3f(Some(&self.u_color), r * 0.3, g * 0.3, b * 0.3);
+            gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.triangle_index_buffer));
+            gl.draw_elements_with_i32(GL::TRIANGLES, self.triangle_count, GL::UNSIGNED_SHORT, 0);
+
+            // Draw wireframe
+            gl.uniform3f(Some(&self.u_color), r, g, b);
+            gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.line_index_buffer));
+            gl.draw_elements_with_i32(GL::LINES, self.line_count, GL::UNSIGNED_SHORT, 0);
         }
-        gl.vertex_attrib_pointer_with_i32(self.a_position, 2, GL::FLOAT, false, 0, 0);
-
-        // Draw filled triangles
-        gl.uniform3f(Some(&self.u_color), 0.2, 0.2, 0.3);
-        gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.triangle_index_buffer));
-        gl.draw_elements_with_i32(GL::TRIANGLES, self.triangle_count, GL::UNSIGNED_SHORT, 0);
-
-        // Draw wireframe
-        gl.uniform3f(Some(&self.u_color), 0.4, 0.8, 1.0);
-        gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.line_index_buffer));
-        gl.draw_elements_with_i32(GL::LINES, self.line_count, GL::UNSIGNED_SHORT, 0);
     }
 }
 

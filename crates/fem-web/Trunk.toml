@@ -1,2 +1,2 @@
 [watch]
-watch = ["../fem-core/src"]
+watch = ["src", "../fem-core/src"]

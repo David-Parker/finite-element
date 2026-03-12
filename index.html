@@ -8,15 +8,16 @@
 <body>
   <canvas id="canvas" width="600" height="600"></canvas>
   <div id="info">
-    <b>Space</b> pause | <b>R</b> reset | <b>T</b> trace | <span class="rust">Powered by Rust + WebAssembly</span>
+    <b>Space</b> pause | <b>R</b> reset | <b>T</b> trace | <b>1-5</b> materials | <span class="rust">Powered by Rust + WebAssembly</span>
   </div>
   <div id="status">
+    <div>Material: <span id="material">BOUNCY_RUBBER</span></div>
     <div>FPS: <span id="fps">0</span></div>
     <div>Frame: <span id="frameCount">0</span></div>
     <div>KE: <span id="kineticEnergy">0</span></div>
     <div>Vel: <span id="maxVelocity">0</span> m/s</div>
   </div>
 
-  <link data-trunk rel="rust" data-wasm-opt="z" />
+  <link data-trunk rel="rust" data-cargo-package="fem-web" data-wasm-opt="z" />
 </body>
 </html>

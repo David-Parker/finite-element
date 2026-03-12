@@ -1,0 +1,6 @@
+[build]
+target = "index.html"
+
+[watch]
+watch = ["crates/fem-core", "crates/fem-web", "index.html", "style.css"]
+ignore = ["target"]

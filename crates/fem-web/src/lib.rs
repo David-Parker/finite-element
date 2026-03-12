@@ -19,7 +19,7 @@ use crate::renderer::Renderer;
 use crate::trace::Tracer;
 
 // Configuration
-const SEGMENTS: u32 = 32;
+const SEGMENTS: u32 = 16;        // Reduced for 128 triangles (16 * 4 * 2 = 128)
 const RADIAL_DIVISIONS: u32 = 4;
 const OUTER_RADIUS: f32 = 1.5;  // 3m diameter
 const INNER_RADIUS: f32 = 1.0;
@@ -30,9 +30,9 @@ const SUBSTEPS: u32 = 64;
 const FIXED_DT: f64 = 1.0 / 60.0;  // Physics runs at 60Hz
 const MAX_FRAME_TIME: f64 = 0.1;   // Cap to prevent spiral of death
 
-fn create_soft_body(material: Material) -> SoftBody {
+fn create_soft_body(material: Material, x_offset: f32, y_offset: f32) -> SoftBody {
     let mut mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
-    offset_vertices(&mut mesh.vertices, 0.0, START_HEIGHT);
+    offset_vertices(&mut mesh.vertices, x_offset, y_offset);
     SoftBody::new(&mesh.vertices, &mesh.triangles, material)
 }
 
@@ -46,6 +46,8 @@ fn material_name(material: Material) -> &'static str {
         "WOOD"
     } else if material.young_modulus == Material::METAL.young_modulus {
         "METAL"
+    } else if material.young_modulus == Material::BOUNCY_RUBBER.young_modulus {
+        "BOUNCY_RUBBER"
     } else {
         "UNKNOWN"
     }
@@ -53,7 +55,7 @@ fn material_name(material: Material) -> &'static str {
 
 /// Simulation state
 struct Simulation {
-    soft_body: SoftBody,
+    bodies: Vec<SoftBody>,
     renderer: Renderer,
     #[allow(dead_code)]
     triangles: Vec<u32>,
@@ -68,10 +70,18 @@ struct Simulation {
     current_material: Material,
 }
 
+// Colors for each body (cyan, orange)
+const BODY_COLORS: [(f32, f32, f32); 2] = [
+    (0.4, 0.8, 1.0),  // cyan
+    (1.0, 0.6, 0.2),  // orange
+];
+
 impl Simulation {
     fn new(gl: WebGlRenderingContext) -> Result<Self, JsValue> {
-        let current_material = Material::RUBBER;
-        let soft_body = create_soft_body(current_material);
+        let current_material = Material::BOUNCY_RUBBER;
+        // Create two bodies: one higher and slightly left, one lower and slightly right
+        let body1 = create_soft_body(current_material, -0.5, START_HEIGHT + 4.0);
+        let body2 = create_soft_body(current_material, 0.5, START_HEIGHT);
         let mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
         let line_indices = create_ring_wireframe(SEGMENTS, RADIAL_DIVISIONS);
 
@@ -80,7 +90,7 @@ impl Simulation {
         renderer.set_ground(GROUND_Y);
 
         Ok(Simulation {
-            soft_body,
+            bodies: vec![body1, body2],
             renderer,
             triangles: mesh.triangles,
             line_indices,
@@ -95,7 +105,10 @@ impl Simulation {
     }
 
     fn reset(&mut self) {
-        self.soft_body = create_soft_body(self.current_material);
+        self.bodies = vec![
+            create_soft_body(self.current_material, -0.5, START_HEIGHT + 4.0),
+            create_soft_body(self.current_material, 0.5, START_HEIGHT),
+        ];
         self.frame_count = 0;
         self.accumulator = 0.0;
     }
@@ -119,41 +132,51 @@ impl Simulation {
         let delta_time = delta_time.min(MAX_FRAME_TIME);
         self.accumulator += delta_time;
 
+        // Collision distance threshold (based on mesh density)
+        let collision_dist = 0.25;
+
         // Run fixed timestep physics updates
         while self.accumulator >= FIXED_DT {
             let substep_dt = (FIXED_DT / SUBSTEPS as f64) as f32;
 
             // Debug: log state before substeps
             if self.frame_count < 5 {
-                let ke_before = self.soft_body.get_kinetic_energy();
-                let (_, _, max_vel, _, _, _) = self.soft_body.get_diagnostics();
+                let ke_before: f32 = self.bodies.iter().map(|b| b.get_kinetic_energy()).sum();
                 console::log_1(&format!(
-                    "Frame {}: KE={:.2}, maxVel={:.2}, dt={:.6}",
-                    self.frame_count, ke_before, max_vel, substep_dt
+                    "Frame {}: KE={:.2}, dt={:.6}",
+                    self.frame_count, ke_before, substep_dt
                 ).into());
             }
 
-            let mut total_corrections = 0u32;
             for _ in 0..SUBSTEPS {
-                let (_, corrections) = self.soft_body.substep(substep_dt, GRAVITY);
-                total_corrections += corrections;
-                self.soft_body.collide_with_ground(GROUND_Y);
+                // Physics substep for each body
+                for body in &mut self.bodies {
+                    body.substep(substep_dt, GRAVITY);
+                    body.collide_with_ground(GROUND_Y);
+                }
+
+                // Inter-body collisions (need to handle borrow checker)
+                if self.bodies.len() >= 2 {
+                    let (first, rest) = self.bodies.split_at_mut(1);
+                    first[0].collide_with_body(&mut rest[0], collision_dist);
+                }
             }
 
             // Debug: log state after substeps
             if self.frame_count < 5 {
-                let ke_after = self.soft_body.get_kinetic_energy();
-                let (min_j, max_j, max_vel, _, _, _) = self.soft_body.get_diagnostics();
+                let ke_after: f32 = self.bodies.iter().map(|b| b.get_kinetic_energy()).sum();
                 console::log_1(&format!(
-                    "  After: KE={:.2}, maxVel={:.2}, J=[{:.2},{:.2}], strain_corrections={}",
-                    ke_after, max_vel, min_j, max_j, total_corrections
+                    "  After: KE={:.2}",
+                    ke_after
                 ).into());
             }
 
             // Only sleep if object is on the ground and has very low energy
-            let lowest_y = self.soft_body.get_lowest_y();
-            if lowest_y < GROUND_Y + 0.1 {
-                self.soft_body.sleep_if_resting(1.0);  // Much lower threshold
+            for body in &mut self.bodies {
+                let lowest_y = body.get_lowest_y();
+                if lowest_y < GROUND_Y + 0.1 {
+                    body.sleep_if_resting(1.0);
+                }
             }
 
             self.accumulator -= FIXED_DT;
@@ -163,7 +186,8 @@ impl Simulation {
     }
 
     fn render(&self) {
-        self.renderer.render(&self.soft_body.pos);
+        let positions: Vec<&[f32]> = self.bodies.iter().map(|b| b.pos.as_slice()).collect();
+        self.renderer.render_bodies(&positions, &BODY_COLORS);
     }
 
     fn toggle_pause(&mut self) {
@@ -173,28 +197,32 @@ impl Simulation {
     }
 
     fn get_kinetic_energy(&self) -> f32 {
-        self.soft_body.get_kinetic_energy()
+        self.bodies.iter().map(|b| b.get_kinetic_energy()).sum()
     }
 
     fn get_max_velocity(&self) -> f32 {
-        let (_, _, max_vel, _, _, _) = self.soft_body.get_diagnostics();
-        max_vel
+        self.bodies.iter()
+            .map(|b| b.get_diagnostics().2)
+            .fold(0.0f32, |a, b| a.max(b))
     }
 
     fn collect_trace(&mut self) {
-        let ke = self.soft_body.get_kinetic_energy();
-        let (min_j, max_j, max_vel, max_force, min_plastic_det, max_plastic_det) =
-            self.soft_body.get_diagnostics();
-        self.tracer.record(
-            self.frame_count,
-            ke,
-            min_j,
-            max_j,
-            max_vel,
-            max_force,
-            min_plastic_det,
-            max_plastic_det,
-        );
+        // Trace first body only for now
+        if let Some(body) = self.bodies.first() {
+            let ke = body.get_kinetic_energy();
+            let (min_j, max_j, max_vel, max_force, min_plastic_det, max_plastic_det) =
+                body.get_diagnostics();
+            self.tracer.record(
+                self.frame_count,
+                ke,
+                min_j,
+                max_j,
+                max_vel,
+                max_force,
+                min_plastic_det,
+                max_plastic_det,
+            );
+        }
     }
 
     fn toggle_tracing(&mut self) {
@@ -246,6 +274,9 @@ pub fn main() -> Result<(), JsValue> {
                 }
                 "4" => {
                     sim.borrow_mut().set_material(Material::METAL);
+                }
+                "5" => {
+                    sim.borrow_mut().set_material(Material::BOUNCY_RUBBER);
                 }
                 _ => {}
             }
@@ -316,6 +347,7 @@ pub fn main() -> Result<(), JsValue> {
 
     console::log_1(&"FEM Soft Body Simulation (Rust/WebAssembly) started".into());
     console::log_1(&"Controls: Space = Pause, R = Reset, T = Trace".into());
+    console::log_1(&"Materials: 1=Jello, 2=Rubber, 3=Wood, 4=Metal, 5=Bouncy Rubber".into());
 
     Ok(())
 }

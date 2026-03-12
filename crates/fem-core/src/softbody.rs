@@ -64,6 +64,16 @@ impl Material {
         yield_stress: 3e6,
         plasticity: 0.3,
     };
+
+    // Stiff rubber - bouncy, springy, no permanent deformation
+    pub const BOUNCY_RUBBER: Material = Material {
+        young_modulus: 2e6,       // Stiff like wood but elastic
+        poisson_ratio: 0.48,      // Nearly incompressible (rubber-like)
+        density: 1100.0,          // Rubber density
+        damping: 150.0,           // Very low damping for max bounce
+        yield_stress: 0.0,        // No plastic deformation
+        plasticity: 0.0,          // Purely elastic
+    };
 }
 
 /// SoftBody manages a deformable mesh with FEM physics
@@ -469,6 +479,92 @@ impl SoftBody {
             max_vel_sq = max_vel_sq.max(vx * vx + vy * vy);
         }
         max_vel_sq.sqrt()
+    }
+
+    /// Collide with another soft body using position-based separation
+    /// Returns the number of collision responses applied
+    pub fn collide_with_body(&mut self, other: &mut SoftBody, min_dist: f32) -> u32 {
+        let mut collisions = 0u32;
+
+        // Accumulate corrections per vertex to avoid compounding
+        let mut self_corr_pos: Vec<(f32, f32)> = vec![(0.0, 0.0); self.num_verts];
+        let mut self_corr_vel: Vec<(f32, f32)> = vec![(0.0, 0.0); self.num_verts];
+        let mut other_corr_pos: Vec<(f32, f32)> = vec![(0.0, 0.0); other.num_verts];
+        let mut other_corr_vel: Vec<(f32, f32)> = vec![(0.0, 0.0); other.num_verts];
+        let mut self_counts: Vec<u32> = vec![0; self.num_verts];
+        let mut other_counts: Vec<u32> = vec![0; other.num_verts];
+
+        for i in 0..self.num_verts {
+            let x1 = self.pos[i * 2];
+            let y1 = self.pos[i * 2 + 1];
+
+            for j in 0..other.num_verts {
+                let x2 = other.pos[j * 2];
+                let y2 = other.pos[j * 2 + 1];
+
+                let dx = x2 - x1;
+                let dy = y2 - y1;
+                let dist_sq = dx * dx + dy * dy;
+
+                if dist_sq < min_dist * min_dist && dist_sq > 1e-10 {
+                    collisions += 1;
+                    let dist = dist_sq.sqrt();
+                    let overlap = min_dist - dist;
+
+                    // Normal from self to other
+                    let nx = dx / dist;
+                    let ny = dy / dist;
+
+                    // Check if vertices are approaching
+                    let vx1 = self.vel[i * 2];
+                    let vy1 = self.vel[i * 2 + 1];
+                    let vx2 = other.vel[j * 2];
+                    let vy2 = other.vel[j * 2 + 1];
+                    let rel_vel = (vx2 - vx1) * nx + (vy2 - vy1) * ny;
+
+                    // Position correction
+                    let pos_correction = overlap * 0.5;
+                    self_corr_pos[i].0 -= nx * pos_correction;
+                    self_corr_pos[i].1 -= ny * pos_correction;
+                    other_corr_pos[j].0 += nx * pos_correction;
+                    other_corr_pos[j].1 += ny * pos_correction;
+
+                    // Velocity correction (only if approaching, rel_vel < 0)
+                    if rel_vel < 0.0 {
+                        let vel_correction = -rel_vel * 0.5; // Inelastic collision
+                        self_corr_vel[i].0 -= nx * vel_correction;
+                        self_corr_vel[i].1 -= ny * vel_correction;
+                        other_corr_vel[j].0 += nx * vel_correction;
+                        other_corr_vel[j].1 += ny * vel_correction;
+                    }
+
+                    self_counts[i] += 1;
+                    other_counts[j] += 1;
+                }
+            }
+        }
+
+        // Apply averaged corrections
+        for i in 0..self.num_verts {
+            if self_counts[i] > 0 {
+                let n = self_counts[i] as f32;
+                self.pos[i * 2] += self_corr_pos[i].0 / n;
+                self.pos[i * 2 + 1] += self_corr_pos[i].1 / n;
+                self.vel[i * 2] += self_corr_vel[i].0 / n;
+                self.vel[i * 2 + 1] += self_corr_vel[i].1 / n;
+            }
+        }
+        for j in 0..other.num_verts {
+            if other_counts[j] > 0 {
+                let n = other_counts[j] as f32;
+                other.pos[j * 2] += other_corr_pos[j].0 / n;
+                other.pos[j * 2 + 1] += other_corr_pos[j].1 / n;
+                other.vel[j * 2] += other_corr_vel[j].0 / n;
+                other.vel[j * 2 + 1] += other_corr_vel[j].1 / n;
+            }
+        }
+
+        collisions
     }
 
     /// Get diagnostic information for tracing
