@@ -20,7 +20,9 @@ A real-time soft body physics simulation using **XPBD (Extended Position-Based D
 - **Shape preservation**: Zero-compliance edge constraints maintain mesh structure
 - **Multiple materials**: Jello, rubber, wood, metal with distinct behaviors
 - **Real-time**: 60 FPS with only 4 physics substeps per frame
-- **Inter-body collisions**: Spatial hash grid for O(n) collision detection
+- **Vertex-edge collisions**: Accurate collision detection using spatial hashing
+- **Irregular meshes**: Supports rings, ellipses, stars, and blob shapes
+- **Mouse interaction**: Click and drag to attract bodies
 - **WebAssembly**: Runs in any modern browser
 - **Portable core**: Physics library has no platform dependencies
 

@@ -59,21 +59,38 @@ impl SpatialHash {
     }
 }
 
+/// Cached edge data for collision detection
+#[derive(Clone)]
+struct CachedEdge {
+    body_idx: usize,
+    v0: usize,
+    v1: usize,
+    mid_x: f32,
+    mid_y: f32,
+    dx: f32,      // e1.x - e0.x
+    dy: f32,      // e1.y - e0.y
+    len_sq: f32,  // dx*dx + dy*dy
+    w0: f32,      // inv_mass of v0
+    w1: f32,      // inv_mass of v1
+}
+
 /// Collision system for handling multi-body collisions efficiently
 pub struct CollisionSystem {
-    hash: SpatialHash,
+    edge_hash: SpatialHash,
     min_dist: f32,
-    aabbs: Vec<(f32, f32, f32, f32)>,  // Cached AABBs per body
-    overlapping_pairs: Vec<(usize, usize)>,  // Body pairs with overlapping AABBs
+    aabbs: Vec<(f32, f32, f32, f32)>,
+    overlapping_pairs: Vec<(usize, usize)>,
+    cached_edges: Vec<CachedEdge>,  // Precomputed edge data per frame
 }
 
 impl CollisionSystem {
     pub fn new(min_dist: f32) -> Self {
         CollisionSystem {
-            hash: SpatialHash::new(min_dist * 2.0),  // Cell size = 2x collision distance
+            edge_hash: SpatialHash::new(min_dist * 2.0),
             min_dist,
             aabbs: Vec::with_capacity(32),
             overlapping_pairs: Vec::with_capacity(64),
+            cached_edges: Vec::with_capacity(256),
         }
     }
 
@@ -85,7 +102,7 @@ impl CollisionSystem {
     }
 
     /// Detect and resolve collisions between all bodies using spatial hashing
-    /// Uses vertex-edge collision with spatial hash for efficiency
+    /// Uses vertex-edge collision with edge spatial hash for efficiency
     pub fn solve_collisions(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
         let num_bodies = bodies.len();
 
@@ -109,30 +126,67 @@ impl CollisionSystem {
             return 0;
         }
 
-        // Step 3: Build spatial hash of all vertices from overlapping bodies
-        self.hash.clear();
-        let mut body_needs_hash = vec![false; num_bodies];
+        // Step 3: Cache edge data and build edge spatial hash
+        self.cached_edges.clear();
+        self.edge_hash.clear();
+
+        let mut body_needs_collision = vec![false; num_bodies];
         for &(i, j) in &self.overlapping_pairs {
-            body_needs_hash[i] = true;
-            body_needs_hash[j] = true;
+            body_needs_collision[i] = true;
+            body_needs_collision[j] = true;
         }
 
         for (body_idx, body) in bodies.iter().enumerate() {
-            if !body_needs_hash[body_idx] { continue; }
-            for vert_idx in 0..body.num_verts {
-                let x = body.pos[vert_idx * 2];
-                let y = body.pos[vert_idx * 2 + 1];
-                self.hash.insert(body_idx, vert_idx, x, y);
+            if !body_needs_collision[body_idx] { continue; }
+
+            for edge in &body.edge_constraints {
+                let w0 = body.inv_mass[edge.v0];
+                let w1 = body.inv_mass[edge.v1];
+
+                // Skip edges where both endpoints are fixed
+                if w0 == 0.0 && w1 == 0.0 { continue; }
+
+                let e0x = body.pos[edge.v0 * 2];
+                let e0y = body.pos[edge.v0 * 2 + 1];
+                let e1x = body.pos[edge.v1 * 2];
+                let e1y = body.pos[edge.v1 * 2 + 1];
+
+                let dx = e1x - e0x;
+                let dy = e1y - e0y;
+                let len_sq = dx * dx + dy * dy;
+
+                if len_sq < 1e-10 { continue; }
+
+                let mid_x = (e0x + e1x) * 0.5;
+                let mid_y = (e0y + e1y) * 0.5;
+
+                let edge_idx = self.cached_edges.len();
+                self.cached_edges.push(CachedEdge {
+                    body_idx,
+                    v0: edge.v0,
+                    v1: edge.v1,
+                    mid_x,
+                    mid_y,
+                    dx,
+                    dy,
+                    len_sq,
+                    w0,
+                    w1,
+                });
+
+                // Insert edge midpoint into spatial hash
+                // Use body_idx in first slot, edge_idx in second
+                self.edge_hash.insert(body_idx, edge_idx, mid_x, mid_y);
             }
         }
 
-        // Step 4: For each vertex, check against nearby edges from other bodies
+        // Step 4: For each vertex, query nearby edges and check collisions
         let mut total_collisions = 0u32;
         let min_dist = self.min_dist;
         let min_dist_sq = min_dist * min_dist;
 
         for body_a_idx in 0..num_bodies {
-            if !body_needs_hash[body_a_idx] { continue; }
+            if !body_needs_collision[body_a_idx] { continue; }
 
             for vert_idx in 0..bodies[body_a_idx].num_verts {
                 let w_vert = bodies[body_a_idx].inv_mass[vert_idx];
@@ -141,83 +195,59 @@ impl CollisionSystem {
                 let vx = bodies[body_a_idx].pos[vert_idx * 2];
                 let vy = bodies[body_a_idx].pos[vert_idx * 2 + 1];
 
-                // Find nearby vertices from other bodies
-                let nearby: Vec<(usize, usize)> = self.hash.query_neighbors(vx, vy)
-                    .filter(|&&(b, _)| b != body_a_idx)
+                // Query nearby edges (returns body_idx, edge_idx pairs)
+                let nearby_edges: Vec<(usize, usize)> = self.edge_hash.query_neighbors(vx, vy)
+                    .filter(|&&(b, _)| b != body_a_idx)  // Skip same body
                     .cloned()
                     .collect();
 
-                // Collect unique edges connected to nearby vertices
-                let mut checked_edges: std::collections::HashSet<(usize, usize, usize)> =
-                    std::collections::HashSet::new();
+                for (body_b_idx, edge_idx) in nearby_edges {
+                    let edge = &self.cached_edges[edge_idx];
 
-                for (body_b_idx, nearby_vert) in nearby {
-                    // Check edges connected to this nearby vertex
-                    for edge in &bodies[body_b_idx].edge_constraints {
-                        if edge.v0 != nearby_vert && edge.v1 != nearby_vert {
-                            continue;
-                        }
+                    // Use cached edge data
+                    let e0x = bodies[body_b_idx].pos[edge.v0 * 2];
+                    let e0y = bodies[body_b_idx].pos[edge.v0 * 2 + 1];
 
-                        let edge_key = (body_b_idx, edge.v0.min(edge.v1), edge.v0.max(edge.v1));
-                        if !checked_edges.insert(edge_key) {
-                            continue; // Already checked this edge
-                        }
+                    // Project vertex onto edge line using cached dx/dy/len_sq
+                    let t = ((vx - e0x) * edge.dx + (vy - e0y) * edge.dy) / edge.len_sq;
+                    let t = t.clamp(0.0, 1.0);
 
-                        let e0 = edge.v0;
-                        let e1 = edge.v1;
-                        let w0 = bodies[body_b_idx].inv_mass[e0];
-                        let w1 = bodies[body_b_idx].inv_mass[e1];
+                    let closest_x = e0x + t * edge.dx;
+                    let closest_y = e0y + t * edge.dy;
 
-                        let e0x = bodies[body_b_idx].pos[e0 * 2];
-                        let e0y = bodies[body_b_idx].pos[e0 * 2 + 1];
-                        let e1x = bodies[body_b_idx].pos[e1 * 2];
-                        let e1y = bodies[body_b_idx].pos[e1 * 2 + 1];
+                    let dx = vx - closest_x;
+                    let dy = vy - closest_y;
+                    let dist_sq = dx * dx + dy * dy;
 
-                        // Find closest point on edge to vertex
-                        let edge_dx = e1x - e0x;
-                        let edge_dy = e1y - e0y;
-                        let edge_len_sq = edge_dx * edge_dx + edge_dy * edge_dy;
+                    if dist_sq < min_dist_sq && dist_sq > 1e-10 {
+                        total_collisions += 1;
 
-                        if edge_len_sq < 1e-10 { continue; }
+                        let dist = dist_sq.sqrt();
+                        let overlap = min_dist - dist;
 
-                        let t = ((vx - e0x) * edge_dx + (vy - e0y) * edge_dy) / edge_len_sq;
-                        let t = t.clamp(0.0, 1.0);
+                        let nx = dx / dist;
+                        let ny = dy / dist;
 
-                        let closest_x = e0x + t * edge_dx;
-                        let closest_y = e0y + t * edge_dy;
+                        let w_edge = (1.0 - t) * edge.w0 + t * edge.w1;
+                        let w_total = w_vert + w_edge;
 
-                        let dx = vx - closest_x;
-                        let dy = vy - closest_y;
-                        let dist_sq = dx * dx + dy * dy;
+                        if w_total < 1e-10 { continue; }
 
-                        if dist_sq < min_dist_sq && dist_sq > 1e-10 {
-                            total_collisions += 1;
+                        let vert_corr = overlap * (w_vert / w_total);
+                        let edge_corr = overlap * (w_edge / w_total);
 
-                            let dist = dist_sq.sqrt();
-                            let overlap = min_dist - dist;
+                        // Move vertex
+                        bodies[body_a_idx].pos[vert_idx * 2] += nx * vert_corr;
+                        bodies[body_a_idx].pos[vert_idx * 2 + 1] += ny * vert_corr;
 
-                            let nx = dx / dist;
-                            let ny = dy / dist;
+                        // Move edge endpoints
+                        let e0_factor = (1.0 - t) * edge.w0 / w_edge.max(1e-10);
+                        let e1_factor = t * edge.w1 / w_edge.max(1e-10);
 
-                            let w_edge = (1.0 - t) * w0 + t * w1;
-                            let w_total = w_vert + w_edge;
-
-                            if w_total < 1e-10 { continue; }
-
-                            let vert_corr = overlap * (w_vert / w_total);
-                            let edge_corr = overlap * (w_edge / w_total);
-
-                            bodies[body_a_idx].pos[vert_idx * 2] += nx * vert_corr;
-                            bodies[body_a_idx].pos[vert_idx * 2 + 1] += ny * vert_corr;
-
-                            let e0_factor = (1.0 - t) * w0 / w_edge.max(1e-10);
-                            let e1_factor = t * w1 / w_edge.max(1e-10);
-
-                            bodies[body_b_idx].pos[e0 * 2] -= nx * edge_corr * e0_factor;
-                            bodies[body_b_idx].pos[e0 * 2 + 1] -= ny * edge_corr * e0_factor;
-                            bodies[body_b_idx].pos[e1 * 2] -= nx * edge_corr * e1_factor;
-                            bodies[body_b_idx].pos[e1 * 2 + 1] -= ny * edge_corr * e1_factor;
-                        }
+                        bodies[body_b_idx].pos[edge.v0 * 2] -= nx * edge_corr * e0_factor;
+                        bodies[body_b_idx].pos[edge.v0 * 2 + 1] -= ny * edge_corr * e0_factor;
+                        bodies[body_b_idx].pos[edge.v1 * 2] -= nx * edge_corr * e1_factor;
+                        bodies[body_b_idx].pos[edge.v1 * 2 + 1] -= ny * edge_corr * e1_factor;
                     }
                 }
             }
