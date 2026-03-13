@@ -241,7 +241,7 @@ impl Simulation {
             }
 
             self.profiler.begin("substeps");
-            for _ in 0..SUBSTEPS {
+            for _substep in 0..SUBSTEPS {
                 // Pre-solve and constraints for all bodies
                 self.profiler.begin("constraints");
                 for body in &mut self.bodies {

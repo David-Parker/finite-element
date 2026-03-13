@@ -101,17 +101,11 @@ impl CollisionSystem {
 
                 // Collect neighbors to avoid borrow issues
                 let neighbors: Vec<(usize, usize)> = self.hash.query_neighbors(x1, y1)
-                    .filter(|&&(b, v)| {
-                        // Only check other bodies, and avoid duplicate pairs
-                        b > body_idx || (b == body_idx && v > vert_idx)
-                    })
+                    .filter(|&&(b, _v)| b > body_idx)  // Only check other bodies with higher index
                     .cloned()
                     .collect();
 
                 for (other_body_idx, other_vert_idx) in neighbors {
-                    // Skip same-body collisions (handled by constraints)
-                    if body_idx == other_body_idx { continue; }
-
                     let w2 = bodies[other_body_idx].inv_mass[other_vert_idx];
                     if w2 == 0.0 { continue; }
 
