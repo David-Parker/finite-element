@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <title>2D FEM Soft Body - Rust/WebAssembly</title>
   <link rel="stylesheet" href="/style-ef088a5ef6ff4eae.css" integrity="sha384-qw2Fosr9Tw9LUJwXWnJqrPKKquRIgnwElBUhxH7eAAdNE8H8NzqYee/MBAdnifss"/>
-<link rel="modulepreload" href="/fem-web-fbe784cad16ccc54.js" crossorigin="anonymous" integrity="sha384-LrlakDU17mjxFAbzFn9384insecxJJlROEc3Otug0p8jDSz9No2jhITRbg/YYZxO"><link rel="preload" href="/fem-web-fbe784cad16ccc54_bg.wasm" crossorigin="anonymous" integrity="sha384-33TxUWAWNkSqqiznQOd5PGdPsLI7W+68G7QtkTmVwK6goJ6v2AY6gRP34yuSznbB" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/fem-web-2e544bac0134b2c5.js" crossorigin="anonymous" integrity="sha384-jbsyxVnGoOv+wbGfPqBd3QySZVMtIpUpAJs5pKUbxKuuOWp2AY+vJOGv6MSqQLR0"><link rel="preload" href="/fem-web-2e544bac0134b2c5_bg.wasm" crossorigin="anonymous" integrity="sha384-ACiwH+zfvrFoEGAW9+DWY4RxPHU8sDNGyE/OGBBERhz6u/x4IH/14yQUwK3l6RWj" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="canvas" width="600" height="600"></canvas>
   <div id="info">
@@ -20,8 +20,8 @@
 
   
 <script type="module">
-import init, * as bindings from '/fem-web-fbe784cad16ccc54.js';
-const wasm = await init({ module_or_path: '/fem-web-fbe784cad16ccc54_bg.wasm' });
+import init, * as bindings from '/fem-web-2e544bac0134b2c5.js';
+const wasm = await init({ module_or_path: '/fem-web-2e544bac0134b2c5_bg.wasm' });
 
 
 window.wasmBindings = bindings;

@@ -63,6 +63,8 @@ impl SpatialHash {
 pub struct CollisionSystem {
     hash: SpatialHash,
     min_dist: f32,
+    aabbs: Vec<(f32, f32, f32, f32)>,  // Cached AABBs per body
+    overlapping_pairs: Vec<(usize, usize)>,  // Body pairs with overlapping AABBs
 }
 
 impl CollisionSystem {
@@ -70,15 +72,53 @@ impl CollisionSystem {
         CollisionSystem {
             hash: SpatialHash::new(min_dist * 2.0),  // Cell size = 2x collision distance
             min_dist,
+            aabbs: Vec::with_capacity(32),
+            overlapping_pairs: Vec::with_capacity(64),
         }
+    }
+
+    /// Check if two AABBs overlap (with margin for collision distance)
+    #[inline]
+    fn aabbs_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32), margin: f32) -> bool {
+        a.2 + margin >= b.0 && b.2 + margin >= a.0 &&  // X overlap
+        a.3 + margin >= b.1 && b.3 + margin >= a.1     // Y overlap
     }
 
     /// Detect and resolve collisions between all bodies using spatial hashing
     pub fn solve_collisions(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
-        self.hash.clear();
+        let num_bodies = bodies.len();
 
-        // Insert all vertices into spatial hash
+        // Step 1: Compute AABBs for all bodies
+        self.aabbs.clear();
+        for body in bodies.iter() {
+            self.aabbs.push(body.get_aabb());
+        }
+
+        // Step 2: Find overlapping body pairs (broad phase)
+        self.overlapping_pairs.clear();
+        for i in 0..num_bodies {
+            for j in (i + 1)..num_bodies {
+                if Self::aabbs_overlap(self.aabbs[i], self.aabbs[j], self.min_dist) {
+                    self.overlapping_pairs.push((i, j));
+                }
+            }
+        }
+
+        // Early exit if no overlapping pairs
+        if self.overlapping_pairs.is_empty() {
+            return 0;
+        }
+
+        // Step 3: Insert vertices only from bodies that have overlapping pairs
+        self.hash.clear();
+        let mut body_needs_hash = vec![false; num_bodies];
+        for &(i, j) in &self.overlapping_pairs {
+            body_needs_hash[i] = true;
+            body_needs_hash[j] = true;
+        }
+
         for (body_idx, body) in bodies.iter().enumerate() {
+            if !body_needs_hash[body_idx] { continue; }
             for vert_idx in 0..body.num_verts {
                 if body.inv_mass[vert_idx] == 0.0 { continue; }
                 let x = body.pos[vert_idx * 2];
@@ -87,11 +127,13 @@ impl CollisionSystem {
             }
         }
 
+        // Step 4: Check vertex collisions only for overlapping body pairs
         let mut total_collisions = 0u32;
         let min_dist_sq = self.min_dist * self.min_dist;
 
-        // For each body and vertex, query neighbors
-        for body_idx in 0..bodies.len() {
+        for body_idx in 0..num_bodies {
+            if !body_needs_hash[body_idx] { continue; }
+
             for vert_idx in 0..bodies[body_idx].num_verts {
                 let w1 = bodies[body_idx].inv_mass[vert_idx];
                 if w1 == 0.0 { continue; }
