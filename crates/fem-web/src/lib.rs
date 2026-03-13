@@ -183,16 +183,18 @@ impl Simulation {
             bodies.push(create_xpbd_body(material, x, ground_rest_y));
         }
 
-        // 20 rings falling from above (4 columns x 5 rows)
+        // 20 rings falling from above (5 columns x 4 rows)
         let drop_start = START_HEIGHT + 5.0;
-        let vertical_spacing = 4.0;
-        let horizontal_positions = [-4.5, -1.5, 1.5, 4.5];
+        let vertical_spacing = 3.5;
+        let horizontal_spacing = 3.0;
 
-        for row in 0..5 {
-            for (col, &x) in horizontal_positions.iter().enumerate() {
+        for row in 0..4 {
+            for col in 0..5 {
+                let x = -6.0 + (col as f32) * horizontal_spacing;
                 let y = drop_start + (row as f32) * vertical_spacing;
-                let x_offset = ((row + col) % 3) as f32 * 0.2 - 0.2;
-                bodies.push(create_xpbd_body(material, x + x_offset, y));
+                let x_offset = ((row + col) % 3) as f32 * 0.3 - 0.3;
+                let y_offset = ((row * col) % 5) as f32 * 0.2;
+                bodies.push(create_xpbd_body(material, x + x_offset, y + y_offset));
             }
         }
 
