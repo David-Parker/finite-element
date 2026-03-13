@@ -14,6 +14,7 @@ pub mod mesh;
 pub mod softbody;
 pub mod xpbd;
 pub mod trace;
+pub mod compute;
 
 #[cfg(test)]
 mod simulation_tests;

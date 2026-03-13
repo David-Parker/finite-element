@@ -9,7 +9,10 @@ crate-type = ["rlib"]
 
 [features]
 default = []
-simd = []  # Future: WASM SIMD support
+simd = ["wide"]  # Portable SIMD (x86/ARM/WASM)
+
+[dependencies]
+wide = { version = "0.7", optional = true }
 
 [dev-dependencies]
 # For testing only
