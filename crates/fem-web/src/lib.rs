@@ -174,27 +174,28 @@ impl Simulation {
     }
 
     fn create_bodies(material: XPBDMaterial) -> Vec<XPBDSoftBody> {
-        let mut bodies = Vec::with_capacity(25);
+        let mut bodies = Vec::with_capacity(100);
 
-        // 5 rings on the ground (spread horizontally)
+        // 10 rings on the ground (spread horizontally)
         let ground_rest_y = GROUND_Y + OUTER_RADIUS + 0.1;
-        bodies.push(create_xpbd_body(material, -6.0, ground_rest_y));
-        bodies.push(create_xpbd_body(material, -3.0, ground_rest_y));
-        bodies.push(create_xpbd_body(material, 0.0, ground_rest_y));
-        bodies.push(create_xpbd_body(material, 3.0, ground_rest_y));
-        bodies.push(create_xpbd_body(material, 6.0, ground_rest_y));
+        for i in 0..10 {
+            let x = -13.5 + (i as f32) * 3.0;
+            bodies.push(create_xpbd_body(material, x, ground_rest_y));
+        }
 
-        // 20 rings falling from above (4 columns x 5 rows)
+        // 90 rings falling from above (10 columns x 9 rows)
         let drop_start = START_HEIGHT + 5.0;
-        let vertical_spacing = 4.0;  // Space between rows
-        let horizontal_positions = [-4.5, -1.5, 1.5, 4.5];
+        let vertical_spacing = 3.5;
+        let horizontal_spacing = 3.0;
 
-        for row in 0..5 {
-            for (col, &x) in horizontal_positions.iter().enumerate() {
+        for row in 0..9 {
+            for col in 0..10 {
+                let x = -13.5 + (col as f32) * horizontal_spacing;
                 let y = drop_start + (row as f32) * vertical_spacing;
                 // Add slight offset to break symmetry
-                let x_offset = ((row + col) % 3) as f32 * 0.2 - 0.2;
-                bodies.push(create_xpbd_body(material, x + x_offset, y));
+                let x_offset = ((row + col) % 3) as f32 * 0.3 - 0.3;
+                let y_offset = ((row * col) % 5) as f32 * 0.2;
+                bodies.push(create_xpbd_body(material, x + x_offset, y + y_offset));
             }
         }
 
