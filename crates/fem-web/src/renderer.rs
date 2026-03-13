@@ -3,18 +3,21 @@
 use wasm_bindgen::prelude::*;
 use web_sys::{WebGlRenderingContext as GL, WebGlProgram, WebGlBuffer, WebGlUniformLocation};
 
+/// Body mesh data for rendering
+pub struct BodyMesh<'a> {
+    pub positions: &'a [f32],
+    pub triangles: &'a [u32],
+}
+
 pub struct Renderer {
     gl: GL,
     program: WebGlProgram,
     vertex_buffer: WebGlBuffer,
-    triangle_index_buffer: WebGlBuffer,
-    line_index_buffer: WebGlBuffer,
+    index_buffer: WebGlBuffer,
     ground_buffer: WebGlBuffer,
     u_scale: WebGlUniformLocation,
     u_color: WebGlUniformLocation,
     a_position: u32,
-    triangle_count: i32,
-    line_count: i32,
     pub view_size: f32,
     pub scale: f32,
 }
@@ -58,45 +61,21 @@ impl Renderer {
 
         // Create buffers
         let vertex_buffer = gl.create_buffer().ok_or("Failed to create vertex buffer")?;
-        let triangle_index_buffer = gl.create_buffer().ok_or("Failed to create triangle index buffer")?;
-        let line_index_buffer = gl.create_buffer().ok_or("Failed to create line index buffer")?;
+        let index_buffer = gl.create_buffer().ok_or("Failed to create index buffer")?;
         let ground_buffer = gl.create_buffer().ok_or("Failed to create ground buffer")?;
 
         Ok(Renderer {
             gl,
             program,
             vertex_buffer,
-            triangle_index_buffer,
-            line_index_buffer,
+            index_buffer,
             ground_buffer,
             u_scale,
             u_color,
             a_position,
-            triangle_count: 0,
-            line_count: 0,
             view_size,
             scale,
         })
-    }
-
-    pub fn set_mesh(&mut self, triangles: &[u32], line_indices: &[u32]) {
-        let gl = &self.gl;
-
-        // Upload triangle indices
-        gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.triangle_index_buffer));
-        unsafe {
-            let array = js_sys::Uint16Array::view(&u32_to_u16(triangles));
-            gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &array, GL::STATIC_DRAW);
-        }
-        self.triangle_count = triangles.len() as i32;
-
-        // Upload line indices
-        gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.line_index_buffer));
-        unsafe {
-            let array = js_sys::Uint16Array::view(&u32_to_u16(line_indices));
-            gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &array, GL::STATIC_DRAW);
-        }
-        self.line_count = line_indices.len() as i32;
     }
 
     pub fn set_ground(&self, ground_y: f32) {
@@ -110,11 +89,8 @@ impl Renderer {
         }
     }
 
-    pub fn render(&self, positions: &[f32]) {
-        self.render_bodies(&[positions], &[(0.4, 0.8, 1.0)]);
-    }
-
-    pub fn render_bodies(&self, bodies: &[&[f32]], colors: &[(f32, f32, f32)]) {
+    /// Render bodies with individual mesh data
+    pub fn render_meshes(&self, bodies: &[BodyMesh], colors: &[(f32, f32, f32)]) {
         let gl = &self.gl;
 
         gl.clear_color(0.07, 0.07, 0.07, 1.0);
@@ -128,27 +104,36 @@ impl Renderer {
         gl.draw_arrays(GL::LINES, 0, 2);
 
         // Draw each body
-        for (i, positions) in bodies.iter().enumerate() {
-            // Cycle through colors if more bodies than colors
+        for (i, body) in bodies.iter().enumerate() {
             let (r, g, b) = colors[i % colors.len()];
 
-            // Upload current positions
+            // Upload positions
             gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.vertex_buffer));
             unsafe {
-                let array = js_sys::Float32Array::view(positions);
+                let array = js_sys::Float32Array::view(body.positions);
                 gl.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &array, GL::DYNAMIC_DRAW);
             }
             gl.vertex_attrib_pointer_with_i32(self.a_position, 2, GL::FLOAT, false, 0, 0);
 
-            // Draw filled triangles (darker version of color)
-            gl.uniform3f(Some(&self.u_color), r * 0.3, g * 0.3, b * 0.3);
-            gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.triangle_index_buffer));
-            gl.draw_elements_with_i32(GL::TRIANGLES, self.triangle_count, GL::UNSIGNED_SHORT, 0);
+            // Upload indices
+            gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.index_buffer));
+            unsafe {
+                let indices_u16 = u32_to_u16(body.triangles);
+                let array = js_sys::Uint16Array::view(&indices_u16);
+                gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &array, GL::DYNAMIC_DRAW);
+            }
 
-            // Draw wireframe
+            // Draw filled triangles
+            gl.uniform3f(Some(&self.u_color), r * 0.3, g * 0.3, b * 0.3);
+            gl.draw_elements_with_i32(GL::TRIANGLES, body.triangles.len() as i32, GL::UNSIGNED_SHORT, 0);
+
+            // Draw wireframe (using triangle edges)
             gl.uniform3f(Some(&self.u_color), r, g, b);
-            gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.line_index_buffer));
-            gl.draw_elements_with_i32(GL::LINES, self.line_count, GL::UNSIGNED_SHORT, 0);
+            // Draw as line loop per triangle for wireframe effect
+            for tri in 0..(body.triangles.len() / 3) {
+                let base = (tri * 3) as i32;
+                gl.draw_elements_with_i32(GL::LINE_LOOP, 3, GL::UNSIGNED_SHORT, base * 2);
+            }
         }
     }
 }

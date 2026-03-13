@@ -13,10 +13,10 @@ use std::rc::Rc;
 use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent, MouseEvent};
 
 // Import from the portable core library
-use fem_core::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
+use fem_core::mesh::{create_ring_mesh, offset_vertices};
 use fem_core::xpbd::{XPBDSoftBody, CollisionSystem};
 
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, BodyMesh};
 use crate::trace::Tracer;
 use crate::profiler::Profiler;
 
@@ -85,9 +85,34 @@ impl XPBDMaterial {
     };
 }
 
+/// Shape types for bodies
+#[derive(Clone, Copy)]
+enum ShapeType {
+    Ring,
+    Ellipse,
+    Star,
+    Blob(u32),  // seed for randomization
+}
+
+#[allow(dead_code)]
 fn create_xpbd_body(material: XPBDMaterial, x_offset: f32, y_offset: f32) -> XPBDSoftBody {
-    let mut mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
+    create_shaped_body(material, x_offset, y_offset, ShapeType::Ring).0
+}
+
+fn create_shaped_body(material: XPBDMaterial, x_offset: f32, y_offset: f32, shape: ShapeType) -> (XPBDSoftBody, Vec<u32>) {
+    use fem_core::mesh::{create_ellipse_mesh, create_star_mesh, create_blob_mesh};
+
+    // Create mesh based on shape type
+    let mut mesh = match shape {
+        ShapeType::Ring => create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS),
+        ShapeType::Ellipse => create_ellipse_mesh(2.5, 1.8, SEGMENTS, RADIAL_DIVISIONS),
+        ShapeType::Star => create_star_mesh(1.6, 0.7, 5, RADIAL_DIVISIONS),
+        ShapeType::Blob(seed) => create_blob_mesh(1.4, 0.25, SEGMENTS, RADIAL_DIVISIONS, seed),
+    };
+
     offset_vertices(&mut mesh.vertices, x_offset, y_offset);
+
+    let triangles = mesh.triangles.clone();
 
     let mut body = XPBDSoftBody::new(
         &mesh.vertices,
@@ -100,19 +125,16 @@ fn create_xpbd_body(material: XPBDMaterial, x_offset: f32, y_offset: f32) -> XPB
     // Initialize prev_pos to current position (important for first frame velocity calculation)
     body.prev_pos = body.pos.clone();
 
-    body
+    (body, triangles)
 }
 
 /// Simulation state
 struct Simulation {
     bodies: Vec<XPBDSoftBody>,
+    body_triangles: Vec<Vec<u32>>,  // Triangle indices per body
     collision_system: CollisionSystem,
     renderer: Renderer,
     profiler: Profiler,
-    #[allow(dead_code)]
-    triangles: Vec<u32>,
-    #[allow(dead_code)]
-    line_indices: Vec<u32>,
     paused: bool,
     frame_count: u32,
     last_update_time: f64,
@@ -143,13 +165,10 @@ const BODY_COLORS: [(f32, f32, f32); 10] = [
 impl Simulation {
     fn new(gl: WebGlRenderingContext) -> Result<Self, JsValue> {
         let current_material = XPBDMaterial::BOUNCY_RUBBER;
-        // Create 5 bodies at staggered heights
-        let bodies = Self::create_bodies(current_material);
-        let mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
-        let line_indices = create_ring_wireframe(SEGMENTS, RADIAL_DIVISIONS);
+        // Create bodies with mixed shapes
+        let (bodies, body_triangles) = Self::create_bodies(current_material);
 
         let mut renderer = Renderer::new(gl)?;
-        renderer.set_mesh(&mesh.triangles, &line_indices);
         renderer.set_ground(GROUND_Y);
 
         // Spatial hash collision system (O(1) neighbor lookup)
@@ -160,11 +179,10 @@ impl Simulation {
 
         Ok(Simulation {
             bodies,
+            body_triangles,
             collision_system,
             renderer,
             profiler,
-            triangles: mesh.triangles,
-            line_indices,
             paused: false,
             frame_count: 0,
             last_update_time: 0.0,
@@ -178,36 +196,56 @@ impl Simulation {
         })
     }
 
-    fn create_bodies(material: XPBDMaterial) -> Vec<XPBDSoftBody> {
-        let mut bodies = Vec::with_capacity(25);
+    fn create_bodies(material: XPBDMaterial) -> (Vec<XPBDSoftBody>, Vec<Vec<u32>>) {
+        let mut bodies = Vec::with_capacity(20);
+        let mut triangles = Vec::with_capacity(20);
 
-        // 5 rings on the ground (spread horizontally)
+        // Mix of shapes on the ground
         let ground_rest_y = GROUND_Y + OUTER_RADIUS + 0.1;
-        for i in 0..5 {
+        let shapes = [
+            ShapeType::Ring,
+            ShapeType::Star,
+            ShapeType::Ellipse,
+            ShapeType::Blob(42),
+            ShapeType::Ring,
+        ];
+        for (i, &shape) in shapes.iter().enumerate() {
             let x = -6.0 + (i as f32) * 3.0;
-            bodies.push(create_xpbd_body(material, x, ground_rest_y));
+            let (body, tris) = create_shaped_body(material, x, ground_rest_y, shape);
+            bodies.push(body);
+            triangles.push(tris);
         }
 
-        // 20 rings falling from above (5 columns x 4 rows)
+        // Falling bodies with mixed shapes
         let drop_start = START_HEIGHT + 5.0;
-        let vertical_spacing = 3.5;
-        let horizontal_spacing = 3.0;
+        let vertical_spacing = 4.0;
+        let horizontal_spacing = 3.5;
 
-        for row in 0..4 {
-            for col in 0..5 {
-                let x = -6.0 + (col as f32) * horizontal_spacing;
-                let y = drop_start + (row as f32) * vertical_spacing;
-                let x_offset = ((row + col) % 3) as f32 * 0.3 - 0.3;
-                let y_offset = ((row * col) % 5) as f32 * 0.2;
-                bodies.push(create_xpbd_body(material, x + x_offset, y + y_offset));
-            }
+        let falling_shapes = [
+            ShapeType::Blob(1), ShapeType::Star, ShapeType::Ellipse, ShapeType::Ring,
+            ShapeType::Star, ShapeType::Blob(2), ShapeType::Ring, ShapeType::Ellipse,
+            ShapeType::Ellipse, ShapeType::Ring, ShapeType::Blob(3), ShapeType::Star,
+            ShapeType::Ring, ShapeType::Ellipse, ShapeType::Star, ShapeType::Blob(4),
+        ];
+
+        for (i, &shape) in falling_shapes.iter().enumerate() {
+            let row = i / 4;
+            let col = i % 4;
+            let x = -5.25 + (col as f32) * horizontal_spacing;
+            let y = drop_start + (row as f32) * vertical_spacing;
+            let x_offset = ((row + col) % 3) as f32 * 0.3 - 0.3;
+            let (body, tris) = create_shaped_body(material, x + x_offset, y, shape);
+            bodies.push(body);
+            triangles.push(tris);
         }
 
-        bodies
+        (bodies, triangles)
     }
 
     fn reset(&mut self) {
-        self.bodies = Self::create_bodies(self.current_material);
+        let (bodies, triangles) = Self::create_bodies(self.current_material);
+        self.bodies = bodies;
+        self.body_triangles = triangles;
         self.frame_count = 0;
         self.accumulator = 0.0;
     }
@@ -306,8 +344,14 @@ impl Simulation {
 
     fn render(&mut self) {
         self.profiler.begin("render");
-        let positions: Vec<&[f32]> = self.bodies.iter().map(|b| b.pos.as_slice()).collect();
-        self.renderer.render_bodies(&positions, &BODY_COLORS);
+        let meshes: Vec<BodyMesh> = self.bodies.iter()
+            .zip(self.body_triangles.iter())
+            .map(|(body, tris)| BodyMesh {
+                positions: body.pos.as_slice(),
+                triangles: tris.as_slice(),
+            })
+            .collect();
+        self.renderer.render_meshes(&meshes, &BODY_COLORS);
         self.profiler.end("render");
         self.profiler.end_frame();
     }

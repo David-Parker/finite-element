@@ -129,6 +129,220 @@ pub fn create_square_mesh(size: f32, divisions: u32) -> Mesh {
     Mesh { vertices, triangles }
 }
 
+/// Create an ellipse mesh with non-uniform vertex distribution
+pub fn create_ellipse_mesh(
+    width: f32,
+    height: f32,
+    segments: u32,
+    rings: u32,
+) -> Mesh {
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+
+    // Center vertex
+    vertices.push(0.0);
+    vertices.push(0.0);
+
+    // Create rings of vertices from center outward
+    for r in 1..=rings {
+        let t = r as f32 / rings as f32;
+        let rx = width * 0.5 * t;
+        let ry = height * 0.5 * t;
+
+        for i in 0..segments {
+            let angle = (i as f32 / segments as f32) * PI * 2.0;
+            vertices.push(angle.cos() * rx);
+            vertices.push(angle.sin() * ry);
+        }
+    }
+
+    // Triangles from center to first ring
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        triangles.push(0);  // center
+        triangles.push(1 + i);
+        triangles.push(1 + next);
+    }
+
+    // Triangles between rings
+    for r in 0..(rings - 1) {
+        let ring_start = 1 + r * segments;
+        let next_ring_start = 1 + (r + 1) * segments;
+
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+
+            triangles.push(ring_start + i);
+            triangles.push(next_ring_start + i);
+            triangles.push(ring_start + next);
+
+            triangles.push(ring_start + next);
+            triangles.push(next_ring_start + i);
+            triangles.push(next_ring_start + next);
+        }
+    }
+
+    Mesh { vertices, triangles }
+}
+
+/// Create a star-shaped mesh
+pub fn create_star_mesh(
+    outer_radius: f32,
+    inner_radius: f32,
+    points: u32,
+    rings: u32,
+) -> Mesh {
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+
+    // Center vertex
+    vertices.push(0.0);
+    vertices.push(0.0);
+
+    // Create rings with alternating star points
+    let total_points = points * 2;  // points + valleys
+
+    for r in 1..=rings {
+        let t = r as f32 / rings as f32;
+
+        for i in 0..total_points {
+            let angle = (i as f32 / total_points as f32) * PI * 2.0;
+            // Alternate between outer and inner radius
+            let radius = if i % 2 == 0 {
+                outer_radius * t
+            } else {
+                inner_radius * t
+            };
+            vertices.push(angle.cos() * radius);
+            vertices.push(angle.sin() * radius);
+        }
+    }
+
+    // Triangles from center to first ring
+    for i in 0..total_points {
+        let next = (i + 1) % total_points;
+        triangles.push(0);
+        triangles.push(1 + i);
+        triangles.push(1 + next);
+    }
+
+    // Triangles between rings
+    for r in 0..(rings - 1) {
+        let ring_start = 1 + r * total_points;
+        let next_ring_start = 1 + (r + 1) * total_points;
+
+        for i in 0..total_points {
+            let next = (i + 1) % total_points;
+
+            triangles.push(ring_start + i);
+            triangles.push(next_ring_start + i);
+            triangles.push(ring_start + next);
+
+            triangles.push(ring_start + next);
+            triangles.push(next_ring_start + i);
+            triangles.push(next_ring_start + next);
+        }
+    }
+
+    Mesh { vertices, triangles }
+}
+
+/// Create a blob mesh with randomized vertex positions
+pub fn create_blob_mesh(
+    base_radius: f32,
+    variation: f32,
+    segments: u32,
+    rings: u32,
+    seed: u32,
+) -> Mesh {
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+
+    // Simple deterministic "random" based on seed
+    let pseudo_random = |i: u32, j: u32| -> f32 {
+        let x = ((i.wrapping_mul(1103515245).wrapping_add(j.wrapping_mul(12345)).wrapping_add(seed)) % 1000) as f32 / 1000.0;
+        x * 2.0 - 1.0  // -1 to 1
+    };
+
+    // Center vertex
+    vertices.push(0.0);
+    vertices.push(0.0);
+
+    // Create rings with randomized radii
+    for r in 1..=rings {
+        let base_t = r as f32 / rings as f32;
+
+        for i in 0..segments {
+            let angle = (i as f32 / segments as f32) * PI * 2.0;
+            let random_factor = 1.0 + pseudo_random(r, i) * variation;
+            let radius = base_radius * base_t * random_factor;
+            vertices.push(angle.cos() * radius);
+            vertices.push(angle.sin() * radius);
+        }
+    }
+
+    // Triangles from center to first ring
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        triangles.push(0);
+        triangles.push(1 + i);
+        triangles.push(1 + next);
+    }
+
+    // Triangles between rings
+    for r in 0..(rings - 1) {
+        let ring_start = 1 + r * segments;
+        let next_ring_start = 1 + (r + 1) * segments;
+
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+
+            triangles.push(ring_start + i);
+            triangles.push(next_ring_start + i);
+            triangles.push(ring_start + next);
+
+            triangles.push(ring_start + next);
+            triangles.push(next_ring_start + i);
+            triangles.push(next_ring_start + next);
+        }
+    }
+
+    Mesh { vertices, triangles }
+}
+
+/// Create wireframe for any radial mesh (ellipse, star, blob)
+pub fn create_radial_wireframe(segments: u32, rings: u32) -> Vec<u32> {
+    let mut line_indices = Vec::new();
+
+    // Lines from center to first ring
+    for i in 0..segments {
+        line_indices.push(0);
+        line_indices.push(1 + i);
+    }
+
+    // Lines within and between rings
+    for r in 0..rings {
+        let ring_start = 1 + r * segments;
+
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+
+            // Circumferential line
+            line_indices.push(ring_start + i);
+            line_indices.push(ring_start + next);
+
+            // Radial line to next ring (if not last ring)
+            if r < rings - 1 {
+                let next_ring_start = 1 + (r + 1) * segments;
+                line_indices.push(ring_start + i);
+                line_indices.push(next_ring_start + i);
+            }
+        }
+    }
+
+    line_indices
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
