@@ -1,201 +1,207 @@
-# Finite Element Method (FEM) Soft Body Simulation
+# XPBD Soft Body Simulation
 
-This document describes the mathematical model and equations used in this 2D soft body simulation.
+This document describes the physics model and algorithms used in this 2D soft body simulation.
 
 ## Overview
 
-This simulation combines two key components:
+This simulation uses **XPBD (Extended Position-Based Dynamics)** for soft body physics. XPBD is a position-based method that provides:
 
-1. **Finite Element Method (FEM)**: The spatial discretization approach
-2. **Neo-Hookean Hyperelastic Model**: The constitutive law (material behavior)
+- **Unconditional stability**: No numerical explosions regardless of stiffness or timestep
+- **Compliance-based materials**: Stiffness controlled by compliance parameter (inverse stiffness)
+- **Implicit-like behavior**: Stability of implicit methods with simplicity of explicit methods
 
-Together, these provide a physically-based simulation suitable for large deformations of soft materials like rubber, jello, and biological tissues.
+## Why XPBD over Force-Based FEM?
 
-## Finite Element Method (FEM)
+Traditional force-based FEM computes internal forces from stress tensors and integrates velocities explicitly. This requires:
+- Very small timesteps (128+ substeps per frame)
+- Complex strain limiting for stability
+- Careful material parameter tuning
 
-FEM is a numerical technique for solving partial differential equations by discretizing a continuous domain into smaller "finite elements."
+XPBD instead works directly on positions via constraints:
+- Only 4-8 substeps needed
+- Any stiffness achievable via compliance
+- Simpler implementation
 
-### Why FEM?
+| Aspect | Force-based FEM | XPBD |
+|--------|-----------------|------|
+| Substeps @ 60Hz | 64-128 | 4-8 |
+| Stiffness limit | Bounded by CFL condition | Unlimited (zero compliance = rigid) |
+| Complexity | Stress tensors, Lamé params | Position corrections |
+| Stability | Conditional | Unconditional |
 
-Instead of solving the equations of elasticity over a continuous body (impossible analytically for complex shapes), we:
+## XPBD Algorithm
 
-1. **Discretize**: Divide the body into simple elements (triangles in 2D, tetrahedra in 3D)
-2. **Approximate**: Assume deformation varies linearly within each element
-3. **Compute locally**: Calculate forces for each element independently
-4. **Assemble globally**: Combine element contributions at shared nodes
+### Per-Frame Update
 
-### Elements and Nodes
+```python
+for substep in range(SUBSTEPS):  # 4 substeps
+    # 1. Pre-solve: gravity + position prediction
+    for vertex in body:
+        vertex.prev_pos = vertex.pos
+        vertex.vel += gravity * dt
+        vertex.pos += vertex.vel * dt
 
-- **Elements**: The triangles that make up the mesh. Each element has its own deformation state.
-- **Nodes**: The vertices where elements connect. Forces from adjacent elements accumulate here.
+    # 2. Constraint solving (5 iterations)
+    for iteration in range(5):
+        solve_edge_constraints()
+        solve_area_constraints()
 
-### FEM Workflow (Per Timestep)
+    # 3. Collision handling
+    solve_ground_collision()
+    solve_inter_body_collisions()
 
-```
-For each element (triangle):
-    1. Compute deformation gradient F from current node positions
-    2. Evaluate constitutive model (Neo-Hookean) to get stress P
-    3. Convert stress to nodal forces
-    4. Accumulate forces at shared nodes
-
-For each node (vertex):
-    1. Sum forces from all adjacent elements
-    2. Add external forces (gravity)
-    3. Integrate velocity and position
-```
-
-This separation of local (element) and global (node) computation is the essence of FEM.
-
-## Constitutive Model: Neo-Hookean Hyperelasticity
-
-The constitutive model defines the relationship between deformation and internal stress. We use the **Neo-Hookean hyperelastic model**, which is:
-
-- **Hyperelastic**: Stress derived from a strain energy function (path-independent, energy-conserving)
-- **Neo-Hookean**: A specific energy function suitable for large deformations
-
-This model is well-suited for rubber-like materials and provides stable behavior under large stretching and compression.
-
-## Material Parameters (Constitutive Model Inputs)
-
-### Input Parameters
-
-- **Young's Modulus (E)**: Stiffness of the material (Pa). Higher values = stiffer material.
-- **Poisson's Ratio (ν)**: Incompressibility (0 to 0.5). Values near 0.5 = nearly incompressible.
-- **Density (ρ)**: Mass per unit area (kg/m²).
-- **Damping**: Velocity damping factor per frame.
-
-### Lamé Parameters
-
-The input parameters are converted to Lamé parameters for the constitutive model:
-
-```
-μ = E / (2(1 + ν))           # Shear modulus
-λ = Eν / ((1 + ν)(1 - 2ν))   # First Lamé parameter
+    # 4. Post-solve: derive velocities
+    for vertex in body:
+        vertex.vel = (vertex.pos - vertex.prev_pos) / dt
 ```
 
-## Deformation Gradient (FEM Kinematics)
+### Key Insight
 
-For each triangle element, we compute the **deformation gradient F**, which describes how the material has deformed from its rest state. This is the key quantity that connects the FEM discretization to the constitutive model.
+Velocities are **derived** from position changes, not the other way around. This is why XPBD is unconditionally stable—position corrections are bounded, and velocities follow.
 
-### Rest Shape Matrix (Dm)
+## Constraints
 
-For a triangle with vertices X₀, X₁, X₂ in the rest configuration:
+### Edge Constraints (Distance)
 
+Maintains rest length between connected vertices.
+
+**Constraint function:**
 ```
-Dm = [X₁ - X₀ | X₂ - X₀]
-```
-
-This 2x2 matrix is computed once at initialization and its inverse (Dm⁻¹) is cached.
-
-### Deformed Shape Matrix (Ds)
-
-For current vertex positions x₀, x₁, x₂:
-
-```
-Ds = [x₁ - x₀ | x₂ - x₀]
+C = |x₁ - x₀| - rest_length
 ```
 
-### Deformation Gradient
-
+**Gradient:**
 ```
-F = Ds · Dm⁻¹
+∇C₀ = -(x₁ - x₀) / |x₁ - x₀|
+∇C₁ = +(x₁ - x₀) / |x₁ - x₀|
 ```
 
-The determinant J = det(F) represents the volume ratio (area ratio in 2D):
-- J = 1: No volume change
-- J > 1: Expansion
-- J < 1: Compression
-- J ≤ 0: Inverted element (numerical instability)
-
-## Neo-Hookean Model (Constitutive Equations)
-
-### Strain Energy Density
-
-The Neo-Hookean strain energy density function:
-
+**XPBD correction:**
 ```
-Ψ = (μ/2)(tr(FᵀF) - 2) - μ log(J) + (λ/2)(log(J))²
+λ = -C / (w₀|∇C₀|² + w₁|∇C₁|² + α/dt²)
+Δx₀ = -λ · w₀ · ∇C₀
+Δx₁ = -λ · w₁ · ∇C₁
 ```
 
 Where:
-- `tr(FᵀF)` is the squared Frobenius norm of F
-- The term `- μ log(J)` penalizes volume change
-- The term `(λ/2)(log(J))²` provides additional volume preservation
+- `wᵢ` = inverse mass of vertex i
+- `α` = compliance (0 = infinitely stiff)
+- `dt` = substep timestep
 
-At rest (F = I, J = 1), the energy is zero.
+**Zero compliance** makes edges perfectly rigid, which is essential for **shape preservation**. Without this, bodies flatten into "pancakes" under load.
 
-### First Piola-Kirchhoff Stress
+### Area Constraints (2D Volume)
 
-The stress tensor P is derived from the energy:
+Preserves triangle area.
 
+**Constraint function:**
 ```
-P = μF + (λ log(J) - μ) F⁻ᵀ
-```
-
-Where F⁻ᵀ is the inverse transpose of F.
-
-At rest (F = I, J = 1), the stress is zero (no internal forces).
-
-## Force Computation (FEM Assembly)
-
-This is where FEM and the constitutive model come together: stress from Neo-Hookean is converted to nodal forces using FEM shape function derivatives.
-
-### Elastic Forces
-
-Forces on triangle vertices are computed from the stress:
-
-```
-H = -Area · P · Dm⁻ᵀ
+C = current_area - rest_area
 ```
 
-The columns of H give forces on vertices 1 and 2. Force on vertex 0 is computed to maintain equilibrium:
-
+Where area is computed from the cross product:
 ```
-f₀ = -f₁ - f₂
-```
-
-This ensures momentum conservation (forces sum to zero).
-
-### Gravity
-
-Applied as:
-
-```
-f_gravity = m · g
+area = 0.5 * |(x₁ - x₀) × (x₂ - x₀)|
 ```
 
-Where m is the vertex mass (distributed from triangle areas) and g is gravitational acceleration.
-
-## Time Integration
-
-### Semi-Implicit Euler
-
-The simulation uses semi-implicit (symplectic) Euler integration:
-
+**Gradients (perpendicular to opposite edge):**
 ```
-v(t+dt) = v(t) + (f/m) · dt
-x(t+dt) = x(t) + v(t+dt) · dt
+∇C₀ = 0.5 * (y₁ - y₂, x₂ - x₁)
+∇C₁ = 0.5 * (y₂ - y₀, x₀ - x₂)
+∇C₂ = 0.5 * (y₀ - y₁, x₁ - x₀)
 ```
 
-Note: velocity is updated first, then position uses the new velocity. This provides better energy stability than explicit Euler.
+Area constraints with **non-zero compliance** allow soft body squishing while edge constraints maintain overall shape.
 
-### Substeps
+## Material Parameters
 
-Each frame is divided into multiple substeps (default: 128) for stability:
+### Compliance
 
+Compliance α is the inverse of stiffness:
+- `α = 0`: Infinitely stiff (rigid constraint)
+- `α > 0`: Soft constraint (higher = softer)
+
+The effective stiffness depends on timestep:
 ```
-dt_substep = (1/60) / num_substeps
+effective_alpha = α / dt²
 ```
 
-Smaller timesteps are needed for stiffer materials to prevent numerical explosion.
+This makes constraint stiffness independent of substep count.
 
-### Damping
+### Material Presets
 
-Velocity damping is applied once per frame (not per substep):
+| Material | Edge Compliance | Area Compliance | Behavior |
+|----------|-----------------|-----------------|----------|
+| Jello    | 0               | 1e-6            | Soft, jiggly |
+| Rubber   | 0               | 1e-7            | Bouncy |
+| Wood     | 0               | 1e-8            | Stiff |
+| Metal    | 0               | 0               | Perfectly rigid |
 
+All materials use **zero edge compliance** to prevent shape collapse.
+
+### Mass Distribution
+
+Vertex masses are computed from triangle areas:
 ```
-v = v · (1 - damping_factor)
+vertex_mass += (triangle_area * density) / 3
 ```
+
+Inverse mass is used for constraint solving:
+```
+inv_mass = 1 / mass  (or 0 for fixed vertices)
+```
+
+## Collision Handling
+
+### Ground Collision
+
+Position-based ground collision with friction and restitution:
+
+```python
+if vertex.y < ground_y:
+    # Project out of ground
+    vertex.y = ground_y
+
+    # Reflection (restitution)
+    if moving_down:
+        penetration = ground_y - old_y
+        vertex.y = ground_y + penetration * RESTITUTION
+
+    # Friction
+    horizontal_movement *= FRICTION
+```
+
+### Inter-Body Collision
+
+Vertex-to-vertex collision with mass-weighted separation:
+
+```python
+for each vertex pair (i, j) from different bodies:
+    dist = distance(i, j)
+    if dist < min_dist:
+        overlap = min_dist - dist
+        normal = normalize(j.pos - i.pos)
+
+        # Mass-weighted separation
+        w_sum = i.inv_mass + j.inv_mass
+        i.pos -= normal * overlap * (i.inv_mass / w_sum)
+        j.pos += normal * overlap * (j.inv_mass / w_sum)
+```
+
+**Important:** Collisions must happen **before** post_solve so that velocities correctly reflect the collision response.
+
+## Constraint Iterations
+
+More iterations = better constraint convergence. The simulation uses:
+
+- **5 iterations** per substep for stiff materials
+- **4 substeps** per frame at 60Hz
+
+This provides good shape preservation while maintaining real-time performance.
+
+### Gauss-Seidel vs Jacobi
+
+Constraints are solved in **Gauss-Seidel** style (immediate position updates) rather than Jacobi (batch updates). This provides faster convergence.
 
 ## Mesh Topology
 
@@ -206,142 +212,66 @@ The ring (annulus) mesh is generated with:
 - Proper wrap-around connectivity (no seam discontinuity)
 - Triangle pairs forming quads between adjacent rings
 
-### Mass Distribution
-
-Triangle mass is distributed equally to its three vertices:
-
 ```
-vertex_mass += (triangle_area · density) / 3
+Vertices: SEGMENTS * (RADIAL_DIVISIONS + 1)
+Triangles: SEGMENTS * RADIAL_DIVISIONS * 2
 ```
 
-## Plasticity (Permanent Deformation)
+### Edge Constraint Generation
 
-For materials like wood, deformation can become permanent when stress exceeds a threshold. This is modeled using **multiplicative plasticity** with a plastic deformation gradient.
-
-### Elastic vs Plastic Materials
-
-- **Elastic (rubber, jello, metal)**: Always returns to rest shape. `yield_stress = 0`
-- **Plastic (wood)**: Permanent deformation when overstressed. `yield_stress > 0`
-
-Note: Metal uses high damping instead of plasticity for stability reasons (see Limitations below).
-
-### Material Parameters
-
-- **yield_stress**: Stress threshold before plastic flow begins (Pa)
-- **plasticity**: Rate at which deformation becomes permanent (0-1)
-
-### Multiplicative Plasticity Model
-
-We use a multiplicative decomposition of the deformation gradient, common in finite strain plasticity:
-
+Edges are extracted from triangles, avoiding duplicates:
+```python
+edge_set = set()
+for triangle in triangles:
+    for edge in triangle.edges:
+        sorted_edge = tuple(sorted(edge))
+        if sorted_edge not in edge_set:
+            edge_set.add(sorted_edge)
+            constraints.append(EdgeConstraint(edge, rest_length))
 ```
-F_total = F_elastic · F_plastic
-```
-
-Each triangle tracks a plastic deformation matrix `Fp` (initialized to identity).
-
-#### Algorithm
-
-1. Compute total deformation gradient:
-   ```
-   F_total = Ds · Dm⁻¹
-   ```
-
-2. Extract elastic deformation by removing plastic part:
-   ```
-   F_elastic = F_total · Fp⁻¹
-   ```
-
-3. Compute stress from elastic deformation only (Neo-Hookean):
-   ```
-   P = μ·F_elastic + (λ·log(J_elastic) - μ)·F_elastic⁻ᵀ
-   ```
-
-4. Check yield condition (Frobenius norm of stress):
-   ```
-   if ||P|| > yield_stress:
-       # Plastic flow - update Fp towards F_total
-       Fp_new = lerp(Fp, F_total, plasticity · yield_ratio · rate)
-   ```
-
-5. Apply conservative limits to prevent instability:
-   - Only yield when triangle is healthy: `0.7 < J_total < 1.5`
-   - Limit plastic deformation: `0.85 < det(Fp) < 1.15`
-   - Very slow plastic flow rate: `rate = 0.02`
-
-### Effect on Behavior
-
-| Material | yield_stress | plasticity | Behavior |
-|----------|-------------|------------|----------|
-| Rubber   | 0           | 0          | Soft, bouncy, always recovers |
-| Jello    | 0           | 0          | Very soft, jiggly |
-| Wood     | 2e4         | 0.2        | Can bend/deform permanently |
-| Metal    | 0           | 0          | Stiff, high damping (no bounce) |
-
-### Limitations
-
-The multiplicative plasticity model has stability constraints:
-
-1. **High-stress impacts**: During violent collisions, triangles can deform faster than plastic flow can accommodate, leading to numerical instability. For this reason, metal uses high damping instead of plasticity.
-
-2. **Conservative limits**: The tight bounds on `det(Fp)` (0.85-1.15) limit the amount of permanent deformation possible, but are necessary for stability.
-
-3. **No fracture**: The model allows plastic deformation but not material separation/tearing.
 
 ## Numerical Stability
 
-### Compression Barrier
+### Why XPBD is Stable
 
-To prevent triangle inversion, a barrier force is added when triangles become compressed:
+1. **Position-based**: Corrections are bounded by constraint violations
+2. **Compliance scaling**: `α/dt²` ensures consistent stiffness across timesteps
+3. **No force accumulation**: No risk of force explosion
 
+### Shape Preservation
+
+The critical insight for preventing "pancaking":
+
+- **Zero edge compliance** makes edges rigid
+- Rigid edges prevent horizontal spreading under vertical compression
+- Area constraints alone are insufficient (area can be preserved while flattening)
+
+### Timestep Independence
+
+XPBD's compliance formulation makes behavior timestep-independent:
 ```
-if J < 0.8:
-    compression = 0.8 - J
-    barrier = compression³ · 500 · μ
-    # Barrier is added to stress, pushing triangle back towards healthy state
-```
-
-This cubic scaling provides aggressive resistance as J approaches zero.
-
-### J Clamping
-
-As a fallback, J is clamped when computing stress:
-
-```
-safe_J = max(J, 0.4)
-```
-
-This prevents log(J) from going to -infinity.
-
-### Velocity and Acceleration Limits
-
-Safety limits prevent numerical explosion:
-
-```
-MAX_VELOCITY = 30.0
-MAX_ACCEL = 5000.0
+λ = -C / (w_sum + α/dt²)
 ```
 
-### Substep Requirements
+As `dt → 0`, the compliance term `α/dt²` dominates, giving consistent stiffness.
 
-The simulation uses 128 substeps per frame (dt ≈ 0.00013s) for stability with stiffer materials.
+## Comparison with Neo-Hookean FEM
 
-Typical stable material stiffness ranges:
-- Jello: E = 5e4
-- Rubber: E = 1e5
-- Wood: E = 2e5
-- Metal: E = 4e5
+The codebase includes a legacy force-based FEM solver (`softbody.rs`) using Neo-Hookean hyperelasticity. Key differences:
 
-### Stability Testing
+| Aspect | Neo-Hookean FEM | XPBD |
+|--------|-----------------|------|
+| Physics basis | Continuum mechanics | Constraint projection |
+| Stress computation | P = μF + (λlog(J) - μ)F⁻ᵀ | None (position-based) |
+| Material model | Strain energy density | Compliance parameters |
+| Large deformation | Requires strain limiting | Naturally handled |
+| Implementation | ~200 lines | ~150 lines |
 
-The codebase includes end-to-end simulation tests (`simulation_tests.rs`) that verify:
-- KE stays below 100,000
-- Velocity stays below 60
-- J stays between 0.1 and 10.0
-- All materials survive 10-second simulations
+XPBD trades physical accuracy for stability and simplicity. For real-time soft body simulation, this trade-off is usually worthwhile.
 
 ## References
 
-1. Sifakis, E., & Barbic, J. (2012). FEM Simulation of 3D Deformable Solids. SIGGRAPH Course Notes.
-2. Bonet, J., & Wood, R. D. (2008). Nonlinear Continuum Mechanics for Finite Element Analysis.
-3. Smith, B., et al. (2018). Stable Neo-Hookean Flesh Simulation. ACM TOG.
+1. Macklin, M., Müller, M., & Chentanez, N. (2016). XPBD: Position-Based Simulation of Compliant Constrained Dynamics. Motion in Games.
+2. Müller, M., Heidelberger, B., Hennix, M., & Ratcliff, J. (2007). Position Based Dynamics. Journal of Visual Communication and Image Representation.
+3. Bender, J., Müller, M., & Macklin, M. (2017). A Survey on Position Based Dynamics. EG STAR.
+4. Ten Minute Physics - XPBD tutorial series (https://matthias-research.github.io/pages/tenMinutePhysics/)

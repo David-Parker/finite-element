@@ -1,19 +1,57 @@
-# 2D FEM Soft Body Simulation
+# 2D Soft Body Simulation
 
-A real-time soft body physics simulation using the Finite Element Method (FEM) with Neo-Hookean hyperelastic materials, written in Rust and compiled to WebAssembly.
+A real-time soft body physics simulation using **XPBD (Extended Position-Based Dynamics)** for unconditionally stable simulation, written in Rust and compiled to WebAssembly.
 
 ![Collisions](media/collisions.gif)
 
-![FEM Soft Body Simulation](media/fem.gif)
+![Soft Body Simulation](media/fem.gif)
 
 ## Features
 
-- **FEM-based physics**: Triangular mesh elements with proper force accumulation
-- **Neo-Hookean material model**: Handles large deformations correctly
-- **Multiple materials**: Rubber, jello, wood, metal with distinct behaviors
-- **Real-time**: 60 FPS with 64 physics substeps per frame
+- **XPBD physics**: Position-based constraint solving with compliance for implicit-like stability
+- **Unconditionally stable**: No explosions regardless of material stiffness or timestep
+- **Shape preservation**: Zero-compliance edge constraints maintain mesh structure
+- **Multiple materials**: Jello, rubber, wood, metal with distinct behaviors
+- **Real-time**: 60 FPS with only 4 physics substeps per frame
+- **Inter-body collisions**: Multiple soft bodies bouncing off each other
 - **WebAssembly**: Runs in any modern browser
 - **Portable core**: Physics library has no platform dependencies
+
+## Algorithm
+
+This simulation uses **XPBD (Extended Position-Based Dynamics)** rather than traditional force-based FEM. Key advantages:
+
+| Aspect | Force-based FEM | XPBD |
+|--------|-----------------|------|
+| Stability | Requires tiny timesteps | Unconditionally stable |
+| Substeps needed | 64-128 | 4-8 |
+| Stiffness handling | Limited by timestep | Any stiffness via compliance |
+| Implementation | Complex stress tensors | Simple position constraints |
+
+### XPBD Algorithm (per substep)
+
+```
+1. Pre-solve: Apply gravity, predict positions
+2. Solve constraints (5 iterations):
+   - Edge constraints: Maintain rest lengths between connected vertices
+   - Area constraints: Preserve triangle areas (volume in 2D)
+3. Handle collisions: Ground and inter-body
+4. Post-solve: Derive velocities from position change
+```
+
+### Constraint Formula
+
+```
+λ = -C / (Σ wᵢ|∇Cᵢ|² + α/Δt²)
+```
+
+Where:
+- `C` is the constraint violation
+- `wᵢ` is inverse mass
+- `∇Cᵢ` is the constraint gradient
+- `α` is compliance (inverse stiffness)
+
+**Zero compliance** = infinitely stiff (rigid edges for shape preservation)
 
 ## Building
 
@@ -45,6 +83,7 @@ Output will be in the `dist/` directory.
 | Space | Pause/Resume                           |
 | R     | Reset simulation                       |
 | T     | Toggle tracing (downloads CSV on stop) |
+| 1-5   | Switch materials                       |
 
 ## Project Structure
 
@@ -53,37 +92,45 @@ crates/
   fem-core/           # Portable physics library (no WASM dependencies)
     src/
       lib.rs          # Library exports
-      softbody.rs     # SoftBody struct, materials, physics stepping
-      fem.rs          # FEM: deformation gradient, stress, forces
+      xpbd.rs         # XPBD solver: constraints, collision, integration
       mesh.rs         # Mesh generation (ring, square)
       math.rs         # 2x2 matrix and 2D vector operations
-      trace.rs        # Simulation tracing/debugging
+      fem.rs          # Neo-Hookean stress (legacy, for reference)
+      softbody.rs     # Force-based solver (legacy, for reference)
   fem-web/            # WebAssembly application
     src/
       lib.rs          # WASM entry point, simulation loop
       renderer.rs     # WebGL rendering
-      trace.rs        # CSV export for browser
     index.html        # Web page
-    style.css         # Styling
 ```
 
 ## Materials
 
-```rust
-Material::RUBBER  // Soft, bouncy, fully elastic
-Material::JELLO   // Very soft, bouncy, fully elastic
-Material::WOOD    // Medium stiffness, some plasticity
-Material::METAL   // Stiff, maintains shape under stress
-```
+Materials are defined by constraint compliance (lower = stiffer):
+
+| Material | Edge Compliance | Area Compliance | Behavior |
+|----------|-----------------|-----------------|----------|
+| Jello    | 0 (rigid)       | 1e-6            | Soft, jiggly |
+| Rubber   | 0 (rigid)       | 1e-7            | Bouncy |
+| Wood     | 0 (rigid)       | 1e-8            | Stiff |
+| Metal    | 0 (rigid)       | 0 (rigid)       | Perfectly rigid |
+
+All materials use **zero edge compliance** to prevent shape collapse (pancaking).
 
 ## Documentation
 
-See [docs/fem-model.md](docs/fem-model.md) for the mathematical model:
+See [docs/fem-model.md](docs/fem-model.md) for detailed documentation:
 
-- Finite Element Method discretization
-- Neo-Hookean constitutive model
-- Deformation gradient and stress computation
-- Time integration and stability
+- XPBD algorithm and constraint solving
+- Edge and area constraint mathematics
+- Collision handling
+- Comparison with force-based FEM
+
+## References
+
+1. Macklin, M., et al. (2016). XPBD: Position-Based Simulation of Compliant Constrained Dynamics. Motion in Games.
+2. Müller, M., et al. (2007). Position Based Dynamics. Journal of Visual Communication and Image Representation.
+3. Ten Minute Physics - XPBD tutorials
 
 ## License
 
