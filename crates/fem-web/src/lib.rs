@@ -1,4 +1,6 @@
 //! FEM Soft Body Simulation - Web/WebAssembly application
+//!
+//! Uses XPBD (Extended Position-Based Dynamics) for unconditionally stable simulation
 
 mod renderer;
 mod trace;
@@ -11,7 +13,7 @@ use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent};
 
 // Import from the portable core library
 use fem_core::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
-use fem_core::softbody::{SoftBody, Material};
+use fem_core::xpbd::XPBDSoftBody;
 use fem_core::math;
 use fem_core::fem;
 
@@ -19,43 +21,91 @@ use crate::renderer::Renderer;
 use crate::trace::Tracer;
 
 // Configuration
-const SEGMENTS: u32 = 16;        // Reduced for 128 triangles (16 * 4 * 2 = 128)
+const SEGMENTS: u32 = 16;        // 128 triangles (16 * 4 * 2 = 128)
 const RADIAL_DIVISIONS: u32 = 4;
-const OUTER_RADIUS: f32 = 1.5;  // 3m diameter
+const OUTER_RADIUS: f32 = 1.5;   // 3m diameter
 const INNER_RADIUS: f32 = 1.0;
-const START_HEIGHT: f32 = 6.0;  // 6m above origin
-const GROUND_Y: f32 = -8.0;     // ground at -8m
+const START_HEIGHT: f32 = 6.0;   // 6m above origin
+const GROUND_Y: f32 = -8.0;      // ground at -8m
 const GRAVITY: f32 = -9.8;
-const SUBSTEPS: u32 = 64;
+// 4 substeps for good performance while maintaining stability
+const SUBSTEPS: u32 = 4;
 const FIXED_DT: f64 = 1.0 / 60.0;  // Physics runs at 60Hz
 const MAX_FRAME_TIME: f64 = 0.1;   // Cap to prevent spiral of death
 
-fn create_soft_body(material: Material, x_offset: f32, y_offset: f32) -> SoftBody {
-    let mut mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
-    offset_vertices(&mut mesh.vertices, x_offset, y_offset);
-    SoftBody::new(&mesh.vertices, &mesh.triangles, material)
+/// Material presets for XPBD
+/// (edge_compliance, area_compliance, density, damping)
+#[derive(Clone, Copy)]
+struct XPBDMaterial {
+    edge_compliance: f32,
+    area_compliance: f32,
+    density: f32,
+    name: &'static str,
 }
 
-fn material_name(material: Material) -> &'static str {
-    // Compare by young_modulus since we can't derive PartialEq easily
-    if material.young_modulus == Material::JELLO.young_modulus {
-        "JELLO"
-    } else if material.young_modulus == Material::RUBBER.young_modulus {
-        "RUBBER"
-    } else if material.young_modulus == Material::WOOD.young_modulus {
-        "WOOD"
-    } else if material.young_modulus == Material::METAL.young_modulus {
-        "METAL"
-    } else if material.young_modulus == Material::BOUNCY_RUBBER.young_modulus {
-        "BOUNCY_RUBBER"
-    } else {
-        "UNKNOWN"
-    }
+impl XPBDMaterial {
+    // Soft, jiggly
+    const JELLO: XPBDMaterial = XPBDMaterial {
+        edge_compliance: 0.0,
+        area_compliance: 1e-6,   // Stiffer area
+        density: 1000.0,
+        name: "JELLO",
+    };
+
+    // Bouncy rubber
+    const RUBBER: XPBDMaterial = XPBDMaterial {
+        edge_compliance: 0.0,
+        area_compliance: 1e-7,
+        density: 1100.0,
+        name: "RUBBER",
+    };
+
+    // Stiff wood
+    const WOOD: XPBDMaterial = XPBDMaterial {
+        edge_compliance: 0.0,
+        area_compliance: 1e-8,
+        density: 600.0,
+        name: "WOOD",
+    };
+
+    // Very stiff metal
+    const METAL: XPBDMaterial = XPBDMaterial {
+        edge_compliance: 0.0,
+        area_compliance: 0.0,    // Perfectly rigid
+        density: 2000.0,
+        name: "METAL",
+    };
+
+    // Bouncy rubber
+    const BOUNCY_RUBBER: XPBDMaterial = XPBDMaterial {
+        edge_compliance: 0.0,
+        area_compliance: 1e-7,
+        density: 1100.0,
+        name: "BOUNCY_RUBBER",
+    };
+}
+
+fn create_xpbd_body(material: XPBDMaterial, x_offset: f32, y_offset: f32) -> XPBDSoftBody {
+    let mut mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
+    offset_vertices(&mut mesh.vertices, x_offset, y_offset);
+
+    let mut body = XPBDSoftBody::new(
+        &mesh.vertices,
+        &mesh.triangles,
+        material.density,
+        material.edge_compliance,
+        material.area_compliance,
+    );
+
+    // Initialize prev_pos to current position (important for first frame velocity calculation)
+    body.prev_pos = body.pos.clone();
+
+    body
 }
 
 /// Simulation state
 struct Simulation {
-    bodies: Vec<SoftBody>,
+    bodies: Vec<XPBDSoftBody>,
     renderer: Renderer,
     #[allow(dead_code)]
     triangles: Vec<u32>,
@@ -67,21 +117,23 @@ struct Simulation {
     accumulator: f64,
     fps: f64,
     tracer: Tracer,
-    current_material: Material,
+    current_material: XPBDMaterial,
 }
 
-// Colors for each body (cyan, orange)
-const BODY_COLORS: [(f32, f32, f32); 2] = [
+// Colors for each body
+const BODY_COLORS: [(f32, f32, f32); 5] = [
     (0.4, 0.8, 1.0),  // cyan
     (1.0, 0.6, 0.2),  // orange
+    (0.5, 1.0, 0.5),  // green
+    (1.0, 0.4, 0.7),  // pink
+    (0.9, 0.9, 0.3),  // yellow
 ];
 
 impl Simulation {
     fn new(gl: WebGlRenderingContext) -> Result<Self, JsValue> {
-        let current_material = Material::BOUNCY_RUBBER;
-        // Create two bodies: one higher and slightly left, one lower and slightly right
-        let body1 = create_soft_body(current_material, -0.5, START_HEIGHT + 4.0);
-        let body2 = create_soft_body(current_material, 0.5, START_HEIGHT);
+        let current_material = XPBDMaterial::BOUNCY_RUBBER;
+        // Create 5 bodies at staggered heights
+        let bodies = Self::create_bodies(current_material);
         let mesh = create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS);
         let line_indices = create_ring_wireframe(SEGMENTS, RADIAL_DIVISIONS);
 
@@ -90,7 +142,7 @@ impl Simulation {
         renderer.set_ground(GROUND_Y);
 
         Ok(Simulation {
-            bodies: vec![body1, body2],
+            bodies,
             renderer,
             triangles: mesh.triangles,
             line_indices,
@@ -104,23 +156,30 @@ impl Simulation {
         })
     }
 
+    fn create_bodies(material: XPBDMaterial) -> Vec<XPBDSoftBody> {
+        vec![
+            create_xpbd_body(material, 0.0, START_HEIGHT + 16.0),
+            create_xpbd_body(material, -0.5, START_HEIGHT + 12.0),
+            create_xpbd_body(material, 0.5, START_HEIGHT + 8.0),
+            create_xpbd_body(material, -0.3, START_HEIGHT + 4.0),
+            create_xpbd_body(material, 0.3, START_HEIGHT),
+        ]
+    }
+
     fn reset(&mut self) {
-        self.bodies = vec![
-            create_soft_body(self.current_material, -0.5, START_HEIGHT + 4.0),
-            create_soft_body(self.current_material, 0.5, START_HEIGHT),
-        ];
+        self.bodies = Self::create_bodies(self.current_material);
         self.frame_count = 0;
         self.accumulator = 0.0;
     }
 
-    fn set_material(&mut self, material: Material) {
+    fn set_material(&mut self, material: XPBDMaterial) {
         self.current_material = material;
         self.reset();
-        console::log_1(&format!("Material: {}", material_name(material)).into());
+        console::log_1(&format!("Material: {} (XPBD)", material.name).into());
     }
 
     fn get_material_name(&self) -> &'static str {
-        material_name(self.current_material)
+        self.current_material.name
     }
 
     fn update(&mut self, delta_time: f64) {
@@ -149,18 +208,26 @@ impl Simulation {
             }
 
             for _ in 0..SUBSTEPS {
-                // Physics substep for each body
+                // Pre-solve and constraints for all bodies
                 for body in &mut self.bodies {
-                    body.substep(substep_dt, GRAVITY);
-                    body.collide_with_ground(GROUND_Y);
+                    body.substep_pre(substep_dt, GRAVITY, Some(GROUND_Y));
                 }
 
-                // Inter-body collisions (need to handle borrow checker)
-                if self.bodies.len() >= 2 {
-                    let (first, rest) = self.bodies.split_at_mut(1);
-                    first[0].collide_with_body(&mut rest[0], collision_dist);
+                // Inter-body collisions BEFORE post_solve (so velocities are correct)
+                for i in 0..self.bodies.len() {
+                    for j in (i + 1)..self.bodies.len() {
+                        let (left, right) = self.bodies.split_at_mut(j);
+                        left[i].collide_with_body(&mut right[0], collision_dist);
+                    }
+                }
+
+                // Finalize substep: derive velocities from position change
+                for body in &mut self.bodies {
+                    body.substep_post(substep_dt);
                 }
             }
+
+            // No damping - let objects bounce naturally
 
             // Debug: log state after substeps
             if self.frame_count < 5 {
@@ -202,7 +269,7 @@ impl Simulation {
 
     fn get_max_velocity(&self) -> f32 {
         self.bodies.iter()
-            .map(|b| b.get_diagnostics().2)
+            .map(|b| b.get_max_velocity())
             .fold(0.0f32, |a, b| a.max(b))
     }
 
@@ -210,17 +277,18 @@ impl Simulation {
         // Trace first body only for now
         if let Some(body) = self.bodies.first() {
             let ke = body.get_kinetic_energy();
-            let (min_j, max_j, max_vel, max_force, min_plastic_det, max_plastic_det) =
-                body.get_diagnostics();
+            let max_vel = body.get_max_velocity();
+            // XPBD doesn't have J (volume ratio) or stress info directly
+            // Use placeholder values
             self.tracer.record(
                 self.frame_count,
                 ke,
-                min_j,
-                max_j,
+                1.0,  // min_j placeholder
+                1.0,  // max_j placeholder
                 max_vel,
-                max_force,
-                min_plastic_det,
-                max_plastic_det,
+                0.0,  // max_force placeholder
+                1.0,  // min_plastic_det placeholder
+                1.0,  // max_plastic_det placeholder
             );
         }
     }
@@ -264,19 +332,19 @@ pub fn main() -> Result<(), JsValue> {
                     sim.borrow_mut().toggle_tracing();
                 }
                 "1" => {
-                    sim.borrow_mut().set_material(Material::JELLO);
+                    sim.borrow_mut().set_material(XPBDMaterial::JELLO);
                 }
                 "2" => {
-                    sim.borrow_mut().set_material(Material::RUBBER);
+                    sim.borrow_mut().set_material(XPBDMaterial::RUBBER);
                 }
                 "3" => {
-                    sim.borrow_mut().set_material(Material::WOOD);
+                    sim.borrow_mut().set_material(XPBDMaterial::WOOD);
                 }
                 "4" => {
-                    sim.borrow_mut().set_material(Material::METAL);
+                    sim.borrow_mut().set_material(XPBDMaterial::METAL);
                 }
                 "5" => {
-                    sim.borrow_mut().set_material(Material::BOUNCY_RUBBER);
+                    sim.borrow_mut().set_material(XPBDMaterial::BOUNCY_RUBBER);
                 }
                 _ => {}
             }
@@ -345,7 +413,7 @@ pub fn main() -> Result<(), JsValue> {
         request_animation_frame(&window, g.borrow().as_ref().unwrap());
     }
 
-    console::log_1(&"FEM Soft Body Simulation (Rust/WebAssembly) started".into());
+    console::log_1(&"XPBD Soft Body Simulation (Rust/WebAssembly) started".into());
     console::log_1(&"Controls: Space = Pause, R = Reset, T = Trace".into());
     console::log_1(&"Materials: 1=Jello, 2=Rubber, 3=Wood, 4=Metal, 5=Bouncy Rubber".into());
 
