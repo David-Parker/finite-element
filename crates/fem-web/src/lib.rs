@@ -15,8 +15,6 @@ use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent};
 // Import from the portable core library
 use fem_core::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
 use fem_core::xpbd::{XPBDSoftBody, CollisionSystem};
-use fem_core::math;
-use fem_core::fem;
 
 use crate::renderer::Renderer;
 use crate::trace::Tracer;
@@ -460,34 +458,3 @@ fn request_animation_frame(window: &web_sys::Window, f: &Closure<dyn FnMut()>) {
         .expect("should register `requestAnimationFrame` OK");
 }
 
-/// Run tests (callable from JS console)
-#[wasm_bindgen]
-pub fn run_tests() -> bool {
-    console::log_1(&"Running FEM tests...".into());
-
-    let i = math::mat2_identity();
-    assert_eq!(i, [1.0, 0.0, 0.0, 1.0]);
-    console::log_1(&"  mat2_identity".into());
-
-    let det = math::mat2_det(&[2.0, 0.0, 0.0, 3.0]);
-    assert!((det - 6.0).abs() < 1e-6);
-    console::log_1(&"  mat2_det".into());
-
-    let area = fem::compute_triangle_area(0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
-    assert!((area - 0.5).abs() < 1e-6);
-    console::log_1(&"  triangle_area".into());
-
-    let f = math::mat2_identity();
-    let energy = fem::compute_neo_hookean_energy(&f, 1.0, 1000.0, 2000.0);
-    assert!(energy.abs() < 1e-6);
-    console::log_1(&"  neo_hookean_energy_at_rest".into());
-
-    let p = fem::compute_neo_hookean_stress(&f, 1.0, 1000.0, 2000.0);
-    for val in &p {
-        assert!(val.abs() < 1e-6);
-    }
-    console::log_1(&"  neo_hookean_stress_at_rest".into());
-
-    console::log_1(&"All tests passed!".into());
-    true
-}

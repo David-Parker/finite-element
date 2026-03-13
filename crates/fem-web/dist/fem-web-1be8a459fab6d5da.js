@@ -2,15 +2,6 @@ export function main() {
     wasm.main();
 }
 
-/**
- * Run tests (callable from JS console)
- * @returns {boolean}
- */
-export function run_tests() {
-    const ret = wasm.run_tests();
-    return ret !== 0;
-}
-
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
