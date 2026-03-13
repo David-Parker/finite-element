@@ -94,29 +94,62 @@ pub fn compute_neo_hookean_energy(f: &Mat2, j: f32, mu: f32, lambda: f32) -> f32
 
 /// Compute Neo-Hookean first Piola-Kirchhoff stress tensor P
 /// P = μF + (λ log(J) - μ) F^(-T)
-/// With barrier to prevent triangle inversion
+/// Uses Stable Neo-Hookean formulation with log barrier for inversion prevention
 pub fn compute_neo_hookean_stress(f: &Mat2, j: f32, mu: f32, lambda: f32) -> Mat2 {
-    // Clamp J to prevent numerical issues
-    let safe_j = j.max(0.4);
+    // Safety: if J is invalid, return zero stress (let strain limiting fix it)
+    if !j.is_finite() || j <= 0.0 {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+
+    // Stable Neo-Hookean: clamp J away from zero with smooth barrier
+    const J_MIN: f32 = 0.2;  // Hard floor
+    const J_BARRIER_START: f32 = 0.7;  // Barrier starts here
+
+    let safe_j = j.max(J_MIN);
     let log_j = safe_j.ln();
 
     let f_inv_t = mat2_inv_transpose(f);
+
+    // Check for invalid inverse (degenerate triangle)
+    if !f_inv_t[0].is_finite() || !f_inv_t[1].is_finite() ||
+       !f_inv_t[2].is_finite() || !f_inv_t[3].is_finite() {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
 
     // P = μF + (λ log(J) - μ) F^(-T)
     let term1 = mat2_scale(f, mu);
     let mut coeff = lambda * log_j - mu;
 
-    // Add very strong repulsion when triangle is getting compressed
-    // This acts as a barrier to prevent inversion
-    // Kicks in at j < 0.8 with cubic scaling for aggressive response
-    if j < 0.8 {
-        let compression = 0.8 - j;
-        let barrier = compression * compression * compression * 500.0 * mu;
-        coeff -= barrier;
+    // Log barrier for inversion prevention
+    // Energy barrier: -k * log(J - J_min) which gives force: k / (J - J_min)
+    // This smoothly increases to infinity as J approaches J_min
+    if j < J_BARRIER_START {
+        // Smooth transition using quadratic blend into log barrier
+        let t = (J_BARRIER_START - j) / (J_BARRIER_START - J_MIN);
+        let t_clamped = t.min(0.95);  // Never fully reach the singularity
+
+        // Barrier strength increases with material stiffness
+        let barrier_strength = mu * 2.0;
+
+        // Quadratic-to-log barrier: smooth at start, steep near J_min
+        // derivative = barrier_strength * (2t + t²/(1-t))
+        let barrier_force = barrier_strength * (2.0 * t_clamped + t_clamped * t_clamped / (1.0 - t_clamped + 0.01));
+        coeff -= barrier_force;
     }
 
+    // Clamp coefficient to prevent extreme values
+    coeff = coeff.clamp(-mu * 100.0, mu * 100.0);
+
     let term2 = mat2_scale(&f_inv_t, coeff);
-    mat2_add(&term1, &term2)
+    let result = mat2_add(&term1, &term2);
+
+    // Final safety check
+    if !result[0].is_finite() || !result[1].is_finite() ||
+       !result[2].is_finite() || !result[3].is_finite() {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+
+    result
 }
 
 /// Compute elastic forces on triangle vertices from stress

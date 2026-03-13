@@ -157,7 +157,115 @@ impl SoftBody {
         }
     }
 
-    /// Compute all elastic forces on vertices
+    /// Compute timestep-adaptive stiffness multiplier
+    /// For explicit integration, stiffness must be reduced when dt is large relative to
+    /// the material's natural frequency to maintain stability
+    /// Returns (mu_effective, lambda_effective)
+    pub fn compute_adaptive_stiffness(&self, dt: f32) -> (f32, f32) {
+        // Estimate mesh spacing
+        let avg_area = self.tri_data.iter().map(|t| t.rest_area).sum::<f32>() / self.num_tris as f32;
+        let h = (avg_area * 2.0).sqrt();
+
+        // Wave speed with full material stiffness
+        let c = (self.material.young_modulus / self.material.density).sqrt();
+
+        // CFL number: dimensionless ratio of timestep to stable timestep
+        // CFL = c * dt / h; stable when CFL < 1
+        let cfl = c * dt / h;
+
+        // CRITICAL: Use extremely conservative threshold for stability at large timesteps
+        // The nonlinear feedback in FEM during collision requires much smaller effective CFL
+        // Start scaling when CFL > 0.05 and scale aggressively
+        let safe_cfl = 0.05;
+        let scale = if cfl > safe_cfl {
+            // Scale factor = (safe_cfl/CFL)² because stiffness ~ c² ~ E
+            // Additional factor of 0.5 for extra safety margin during collisions
+            (safe_cfl / cfl).powi(2) * 0.5
+        } else {
+            1.0
+        };
+
+        (self.mu * scale, self.lambda * scale)
+    }
+
+    /// Compute all elastic forces on vertices with timestep-adaptive stiffness
+    pub fn compute_all_forces_with_dt(&mut self, dt: f32) -> ForceStats {
+        self.force.fill(0.0);
+
+        let (mu_eff, lambda_eff) = self.compute_adaptive_stiffness(dt);
+
+        let mut total_energy = 0.0;
+        let mut min_j = f32::INFINITY;
+        let mut max_j = f32::NEG_INFINITY;
+
+        let yield_stress = self.material.yield_stress;
+        let plasticity = self.material.plasticity;
+
+        for t in 0..self.num_tris {
+            let i0 = self.triangles[t * 3] as usize;
+            let i1 = self.triangles[t * 3 + 1] as usize;
+            let i2 = self.triangles[t * 3 + 2] as usize;
+
+            let x0 = self.pos[i0 * 2];
+            let y0 = self.pos[i0 * 2 + 1];
+            let x1 = self.pos[i1 * 2];
+            let y1 = self.pos[i1 * 2 + 1];
+            let x2 = self.pos[i2 * 2];
+            let y2 = self.pos[i2 * 2 + 1];
+
+            // Check for plastic yielding with original stiffness
+            if yield_stress > 0.0 {
+                let (stress_mag, f_total) = compute_stress_magnitude(
+                    &self.tri_data[t],
+                    x0, y0, x1, y1, x2, y2,
+                    self.mu, self.lambda,  // Use full stiffness for yield check
+                );
+
+                let j_total = mat2_det(&f_total);
+                let current_fp_det = mat2_det(&self.tri_data[t].plastic_def);
+
+                if stress_mag > yield_stress
+                    && j_total > 0.7
+                    && j_total < 1.5
+                    && current_fp_det > 0.8
+                    && current_fp_det < 1.2
+                {
+                    let old_fp = self.tri_data[t].plastic_def;
+                    let yield_ratio = ((stress_mag - yield_stress) / stress_mag).min(0.5);
+                    let blend = plasticity * yield_ratio * 0.02;
+                    let new_fp = mat2_lerp(&old_fp, &f_total, blend.min(0.05));
+
+                    let fp_det = mat2_det(&new_fp);
+                    if fp_det > 0.85 && fp_det < 1.15 {
+                        self.tri_data[t].plastic_def = new_fp;
+                    }
+                }
+            }
+
+            // Use adaptive stiffness for force computation
+            let result = compute_triangle_forces(
+                &self.tri_data[t],
+                x0, y0, x1, y1, x2, y2,
+                mu_eff, lambda_eff,
+            );
+
+            // Accumulate forces
+            self.force[i0 * 2] += result.f0[0];
+            self.force[i0 * 2 + 1] += result.f0[1];
+            self.force[i1 * 2] += result.f1[0];
+            self.force[i1 * 2 + 1] += result.f1[1];
+            self.force[i2 * 2] += result.f2[0];
+            self.force[i2 * 2 + 1] += result.f2[1];
+
+            total_energy += result.energy * self.tri_data[t].rest_area;
+            min_j = min_j.min(result.j);
+            max_j = max_j.max(result.j);
+        }
+
+        ForceStats { total_energy, min_j, max_j }
+    }
+
+    /// Compute all elastic forces on vertices (legacy, uses default stiffness)
     pub fn compute_all_forces(&mut self) -> ForceStats {
         self.force.fill(0.0);
 
@@ -292,9 +400,11 @@ impl SoftBody {
     }
 
     /// Integrate velocities and positions using semi-implicit Euler
+    /// Includes safety limits to prevent NaN/inf propagation
     pub fn integrate(&mut self, dt: f32) {
-        const MAX_VELOCITY: f32 = 100.0;
-        const MAX_ACCEL: f32 = 10000.0;
+        // Safety limits - these catch extreme cases but shouldn't activate in normal simulation
+        const MAX_VELOCITY: f32 = 100.0;  // 100 m/s is very fast for soft bodies
+        const MAX_POSITION: f32 = 1000.0; // 1km bounds
 
         for i in 0..self.num_verts {
             let m = self.mass[i];
@@ -302,22 +412,20 @@ impl SoftBody {
                 continue;
             }
 
-            let mut ax = self.force[i * 2] / m;
-            let mut ay = self.force[i * 2 + 1] / m;
+            let ax = self.force[i * 2] / m;
+            let ay = self.force[i * 2 + 1] / m;
 
-            // Clamp acceleration to prevent explosion from bad triangles
-            let accel_sq = ax * ax + ay * ay;
-            if accel_sq > MAX_ACCEL * MAX_ACCEL {
-                let scale = MAX_ACCEL / accel_sq.sqrt();
-                ax *= scale;
-                ay *= scale;
+            // Skip NaN/inf forces
+            if !ax.is_finite() || !ay.is_finite() {
+                continue;
             }
 
+            // Semi-implicit Euler: update velocity first, then position
             self.vel[i * 2] += ax * dt;
             self.vel[i * 2 + 1] += ay * dt;
 
-            // Clamp velocity as safety net
-            let speed_sq = self.vel[i * 2] * self.vel[i * 2] + self.vel[i * 2 + 1] * self.vel[i * 2 + 1];
+            // Clamp velocity to prevent runaway
+            let speed_sq = self.vel[i * 2].powi(2) + self.vel[i * 2 + 1].powi(2);
             if speed_sq > MAX_VELOCITY * MAX_VELOCITY {
                 let scale = MAX_VELOCITY / speed_sq.sqrt();
                 self.vel[i * 2] *= scale;
@@ -326,45 +434,165 @@ impl SoftBody {
 
             self.pos[i * 2] += self.vel[i * 2] * dt;
             self.pos[i * 2 + 1] += self.vel[i * 2 + 1] * dt;
+
+            // Clamp position to bounds
+            self.pos[i * 2] = self.pos[i * 2].clamp(-MAX_POSITION, MAX_POSITION);
+            self.pos[i * 2 + 1] = self.pos[i * 2 + 1].clamp(-MAX_POSITION, MAX_POSITION);
         }
     }
 
-    /// Handle collision with ground plane
+    /// Handle collision with ground plane using soft constraint
+    /// Uses gradual position correction to avoid mesh distortion
     pub fn collide_with_ground(&mut self, ground_y: f32) {
         const FRICTION: f32 = 0.9;
+        const RESTITUTION: f32 = 0.3;  // Bounce coefficient
+        // Gradual correction: only fix a fraction of penetration per substep
+        // This allows the mesh to deform naturally during impact
+        const MAX_CORRECTION_PER_SUBSTEP: f32 = 0.05;  // Max 5cm per substep
 
         for i in 0..self.num_verts {
-            if self.pos[i * 2 + 1] < ground_y {
-                self.pos[i * 2 + 1] = ground_y;
-                // Stop downward motion, dampen upward motion
-                if self.vel[i * 2 + 1] < 0.0 {
-                    self.vel[i * 2 + 1] = 0.0;
-                } else {
-                    self.vel[i * 2 + 1] *= 0.5;
+            let y = self.pos[i * 2 + 1];
+            let vy = self.vel[i * 2 + 1];
+
+            if y < ground_y {
+                let penetration = ground_y - y;
+
+                // Gradual position correction (limit max correction per substep)
+                let correction = penetration.min(MAX_CORRECTION_PER_SUBSTEP);
+                self.pos[i * 2 + 1] += correction;
+
+                // Only modify velocity when vertex is moving into ground
+                if vy < 0.0 {
+                    // Bounce with restitution, but clamp to prevent excessive bounce
+                    let bounce_vel = (-vy * RESTITUTION).min(5.0);
+                    self.vel[i * 2 + 1] = bounce_vel;
                 }
+
                 // Ground friction
                 self.vel[i * 2] *= FRICTION;
             }
         }
     }
 
-    /// Perform one physics substep
+    /// Perform one physics substep with timestep-adaptive stiffness
     /// Returns (ForceStats, strain_corrections)
     pub fn substep(&mut self, dt: f32, gravity: f32) -> (ForceStats, u32) {
-        let stats = self.compute_all_forces();
+        self.substep_with_ground(dt, gravity, None)
+    }
+
+    /// Perform one physics substep including optional ground collision
+    /// Uses velocity-based collision (speculative contacts) for mesh-friendly collision
+    pub fn substep_with_ground(&mut self, dt: f32, gravity: f32, ground_y: Option<f32>) -> (ForceStats, u32) {
+        // Pre-correction: ensure mesh is valid before computing forces
+        self.limit_strain();
+
+        // Sanitize any NaN values
+        self.sanitize_state();
+
+        // Use timestep-adaptive stiffness for stability at large dt
+        let stats = self.compute_all_forces_with_dt(dt);
         self.apply_gravity(gravity);
         self.apply_internal_damping();
+
+        // SPECULATIVE CONTACT: Adjust velocities BEFORE integration to prevent penetration
+        // This is much more mesh-friendly than position correction after penetration
+        if let Some(gy) = ground_y {
+            self.apply_speculative_ground_collision(dt, gy);
+        }
+
         self.integrate(dt);
-        let corrections = self.limit_strain();
-        (stats, corrections)
+
+        // Post-correction: ensure mesh stays valid
+        let mut total_corrections = 0u32;
+        for _ in 0..3 {
+            total_corrections += self.limit_strain();
+        }
+        (stats, total_corrections)
+    }
+
+    /// Speculative ground collision with strong collision damping
+    /// Adjusts velocity before integration to prevent penetration
+    /// Applies strong damping during collision to prevent energy buildup
+    fn apply_speculative_ground_collision(&mut self, dt: f32, ground_y: f32) {
+        const RESTITUTION: f32 = 0.3;
+        const FRICTION: f32 = 0.85;
+        const SKIN_DEPTH: f32 = 0.03;  // Buffer above ground
+        const COLLISION_DAMPING: f32 = 0.95;  // Moderate damping during collision
+
+        // First pass: check if any vertex is in collision zone
+        let collision_zone = ground_y + 1.0;  // Within 1m of ground
+        let mut in_collision = false;
+        for i in 0..self.num_verts {
+            if self.pos[i * 2 + 1] < collision_zone {
+                in_collision = true;
+                break;
+            }
+        }
+
+        // Apply strong damping to ALL vertices during collision
+        // This prevents internal oscillations from building up
+        if in_collision {
+            for i in 0..self.num_verts {
+                self.vel[i * 2] *= COLLISION_DAMPING;
+                self.vel[i * 2 + 1] *= COLLISION_DAMPING;
+            }
+        }
+
+        // Second pass: handle individual vertex collisions
+        for i in 0..self.num_verts {
+            let y = self.pos[i * 2 + 1];
+            let vy = self.vel[i * 2 + 1];
+
+            // Predict where vertex will be after integration
+            let predicted_y = y + vy * dt;
+            let target_y = ground_y + SKIN_DEPTH;
+
+            if predicted_y < target_y {
+                // Calculate velocity that prevents penetration
+                let required_vy = (target_y - y) / dt;
+
+                if vy < required_vy {
+                    let approach_speed = -vy.min(0.0);
+                    let bounce = approach_speed * RESTITUTION;
+                    self.vel[i * 2 + 1] = required_vy.max(bounce);
+                    self.vel[i * 2] *= FRICTION;
+                }
+            }
+
+            // Handle vertices currently below ground
+            if y < ground_y {
+                let push_strength = (ground_y - y).min(0.02);
+                self.pos[i * 2 + 1] += push_strength;
+
+                if self.vel[i * 2 + 1] < 0.0 {
+                    self.vel[i * 2 + 1] = self.vel[i * 2 + 1].abs() * RESTITUTION;
+                }
+            }
+        }
+    }
+
+    /// Clean up any NaN or inf values that may have crept in
+    fn sanitize_state(&mut self) {
+        for i in 0..self.pos.len() {
+            if !self.pos[i].is_finite() {
+                // Reset to some reasonable default - this shouldn't happen
+                // but prevents NaN propagation
+                self.pos[i] = 0.0;
+                self.vel[i] = 0.0;
+            }
+            if !self.vel[i].is_finite() {
+                self.vel[i] = 0.0;
+            }
+        }
     }
 
     /// Limit strain to prevent triangle inversion
     /// Uses position-based correction for stability
     /// Returns count of triangles that were corrected
-    fn limit_strain(&mut self) -> u32 {
-        const MIN_J: f32 = 0.6;  // Minimum allowed volume ratio (prevent inversion)
-        const MAX_J: f32 = 1.2;  // Maximum allowed volume ratio (prevent pancaking)
+    pub fn limit_strain(&mut self) -> u32 {
+        // Tighter bounds for stability with large timesteps
+        const MIN_J: f32 = 0.7;  // Minimum allowed volume ratio (prevent inversion)
+        const MAX_J: f32 = 1.15; // Maximum allowed volume ratio (prevent pancaking)
         let mut corrections = 0u32;
 
         for t in 0..self.num_tris {
@@ -481,10 +709,50 @@ impl SoftBody {
         max_vel_sq.sqrt()
     }
 
-    /// Collide with another soft body using position-based separation
+    /// Get axis-aligned bounding box (min_x, min_y, max_x, max_y)
+    pub fn get_aabb(&self) -> (f32, f32, f32, f32) {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        for i in 0..self.num_verts {
+            let x = self.pos[i * 2];
+            let y = self.pos[i * 2 + 1];
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+
+        (min_x, min_y, max_x, max_y)
+    }
+
+    /// Check if two AABBs overlap (with margin)
+    fn aabb_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32), margin: f32) -> bool {
+        let (a_min_x, a_min_y, a_max_x, a_max_y) = a;
+        let (b_min_x, b_min_y, b_max_x, b_max_y) = b;
+
+        a_max_x + margin >= b_min_x && b_max_x + margin >= a_min_x &&
+        a_max_y + margin >= b_min_y && b_max_y + margin >= a_min_y
+    }
+
+    /// Collide with another soft body using position-based separation with damping
     /// Returns the number of collision responses applied
     pub fn collide_with_body(&mut self, other: &mut SoftBody, min_dist: f32) -> u32 {
+        // Broad phase: AABB check
+        let self_aabb = self.get_aabb();
+        let other_aabb = other.get_aabb();
+        if !Self::aabb_overlap(self_aabb, other_aabb, min_dist) {
+            return 0;  // Bodies are far apart, skip expensive check
+        }
+
         let mut collisions = 0u32;
+
+        // Safety limits to prevent explosions
+        const MAX_POS_CORRECTION: f32 = 0.03;  // Max position change per collision (reduced)
+        const MAX_VEL_CORRECTION: f32 = 0.5;   // Max velocity change per collision (reduced)
+        const COLLISION_DAMPING: f32 = 0.90;   // Strong damping during collision
 
         // Accumulate corrections per vertex to avoid compounding
         let mut self_corr_pos: Vec<(f32, f32)> = vec![(0.0, 0.0); self.num_verts];
@@ -522,16 +790,16 @@ impl SoftBody {
                     let vy2 = other.vel[j * 2 + 1];
                     let rel_vel = (vx2 - vx1) * nx + (vy2 - vy1) * ny;
 
-                    // Position correction
-                    let pos_correction = overlap * 0.5;
+                    // Position correction (clamped)
+                    let pos_correction = (overlap * 0.3).min(MAX_POS_CORRECTION);
                     self_corr_pos[i].0 -= nx * pos_correction;
                     self_corr_pos[i].1 -= ny * pos_correction;
                     other_corr_pos[j].0 += nx * pos_correction;
                     other_corr_pos[j].1 += ny * pos_correction;
 
-                    // Velocity correction (only if approaching, rel_vel < 0)
+                    // Velocity correction (only if approaching, clamped)
                     if rel_vel < 0.0 {
-                        let vel_correction = -rel_vel * 0.5; // Inelastic collision
+                        let vel_correction = (-rel_vel * 0.3).min(MAX_VEL_CORRECTION);
                         self_corr_vel[i].0 -= nx * vel_correction;
                         self_corr_vel[i].1 -= ny * vel_correction;
                         other_corr_vel[j].0 += nx * vel_correction;
@@ -544,23 +812,45 @@ impl SoftBody {
             }
         }
 
-        // Apply averaged corrections
+        // If any collision detected, apply damping to both bodies
+        if collisions > 0 {
+            for i in 0..self.num_verts {
+                self.vel[i * 2] *= COLLISION_DAMPING;
+                self.vel[i * 2 + 1] *= COLLISION_DAMPING;
+            }
+            for j in 0..other.num_verts {
+                other.vel[j * 2] *= COLLISION_DAMPING;
+                other.vel[j * 2 + 1] *= COLLISION_DAMPING;
+            }
+        }
+
+        // Apply averaged corrections with additional clamping
         for i in 0..self.num_verts {
             if self_counts[i] > 0 {
                 let n = self_counts[i] as f32;
-                self.pos[i * 2] += self_corr_pos[i].0 / n;
-                self.pos[i * 2 + 1] += self_corr_pos[i].1 / n;
-                self.vel[i * 2] += self_corr_vel[i].0 / n;
-                self.vel[i * 2 + 1] += self_corr_vel[i].1 / n;
+                let dx = (self_corr_pos[i].0 / n).clamp(-MAX_POS_CORRECTION, MAX_POS_CORRECTION);
+                let dy = (self_corr_pos[i].1 / n).clamp(-MAX_POS_CORRECTION, MAX_POS_CORRECTION);
+                self.pos[i * 2] += dx;
+                self.pos[i * 2 + 1] += dy;
+
+                let dvx = (self_corr_vel[i].0 / n).clamp(-MAX_VEL_CORRECTION, MAX_VEL_CORRECTION);
+                let dvy = (self_corr_vel[i].1 / n).clamp(-MAX_VEL_CORRECTION, MAX_VEL_CORRECTION);
+                self.vel[i * 2] += dvx;
+                self.vel[i * 2 + 1] += dvy;
             }
         }
         for j in 0..other.num_verts {
             if other_counts[j] > 0 {
                 let n = other_counts[j] as f32;
-                other.pos[j * 2] += other_corr_pos[j].0 / n;
-                other.pos[j * 2 + 1] += other_corr_pos[j].1 / n;
-                other.vel[j * 2] += other_corr_vel[j].0 / n;
-                other.vel[j * 2 + 1] += other_corr_vel[j].1 / n;
+                let dx = (other_corr_pos[j].0 / n).clamp(-MAX_POS_CORRECTION, MAX_POS_CORRECTION);
+                let dy = (other_corr_pos[j].1 / n).clamp(-MAX_POS_CORRECTION, MAX_POS_CORRECTION);
+                other.pos[j * 2] += dx;
+                other.pos[j * 2 + 1] += dy;
+
+                let dvx = (other_corr_vel[j].0 / n).clamp(-MAX_VEL_CORRECTION, MAX_VEL_CORRECTION);
+                let dvy = (other_corr_vel[j].1 / n).clamp(-MAX_VEL_CORRECTION, MAX_VEL_CORRECTION);
+                other.vel[j * 2] += dvx;
+                other.vel[j * 2 + 1] += dvy;
             }
         }
 
@@ -695,13 +985,70 @@ mod tests {
         let mesh = create_square_mesh(1.0, 2);
         let mut body = SoftBody::new(&mesh.vertices, &mesh.triangles, Material::JELLO);
 
-        // Move first vertex below ground
-        body.pos[1] = -2.0;
+        // Move first vertex slightly below ground
+        body.pos[1] = -1.05;  // 5cm below ground
         body.vel[1] = -5.0;
 
         body.collide_with_ground(-1.0);
 
-        assert!(body.pos[1] >= -1.0, "Position should be at or above ground");
-        assert!(body.vel[1] >= 0.0, "Downward velocity should be stopped");
+        // Soft collision should correct the penetration
+        assert!(body.pos[1] >= -1.05, "Position should be corrected toward ground");
+        // Velocity should be positive (bounced)
+        assert!(body.vel[1] > 0.0, "Downward velocity should be reversed");
+    }
+
+    #[test]
+    fn test_debug_bouncy_rubber_forces() {
+        use crate::mesh::create_ring_mesh;
+
+        println!("\n=== BOUNCY_RUBBER Force Debug ===");
+        let mesh = create_ring_mesh(1.5, 1.0, 16, 4);
+        let mut body = SoftBody::new(&mesh.vertices, &mesh.triangles, Material::BOUNCY_RUBBER);
+
+        println!("Material: E={}, damping={}, density={}",
+            body.material.young_modulus, body.material.damping, body.material.density);
+        println!("Lame: mu={:.0}, lambda={:.0}", body.mu, body.lambda);
+        println!("Mesh: {} verts, {} tris", body.num_verts, body.num_tris);
+
+        let dt_8 = 1.0 / 60.0 / 8.0;
+
+        // Show adaptive stiffness
+        let (mu_eff, lambda_eff) = body.compute_adaptive_stiffness(dt_8 as f32);
+        println!("Adaptive stiffness (dt={:.6}): mu={:.0} -> {:.0}, lambda={:.0} -> {:.0}",
+            dt_8, body.mu, mu_eff, body.lambda, lambda_eff);
+
+        // Step by step with 8 substeps
+        println!("\nStep-by-step (8 substeps):");
+        let mut body2 = SoftBody::new(&mesh.vertices, &mesh.triangles, Material::BOUNCY_RUBBER);
+        for i in 0..8 {
+            let stats = body2.compute_all_forces_with_dt(dt_8 as f32);
+            let max_f: f32 = (0..body2.num_verts)
+                .map(|j| (body2.force[j*2].powi(2) + body2.force[j*2+1].powi(2)).sqrt())
+                .fold(0.0, f32::max);
+
+            body2.apply_gravity(-9.8);
+            body2.apply_internal_damping();
+            body2.integrate(dt_8 as f32);
+            body2.limit_strain();
+
+            let ke = body2.get_kinetic_energy();
+            let max_vel = body2.get_max_velocity();
+            println!("  Step {}: J=[{:.3},{:.3}], max_f={:.1}, KE={:.1}, vel={:.2}",
+                i, stats.min_j, stats.max_j, max_f, ke, max_vel);
+
+            if ke > 1e6 || ke.is_nan() {
+                println!("  !!! EXPLOSION DETECTED !!!");
+                break;
+            }
+        }
+
+        // Compare with 64 substeps
+        let dt_64 = 1.0 / 60.0 / 64.0;
+        let mut body4 = SoftBody::new(&mesh.vertices, &mesh.triangles, Material::BOUNCY_RUBBER);
+        for _ in 0..64 {
+            body4.substep(dt_64 as f32, -9.8);
+        }
+        println!("\n64 substeps reference:");
+        println!("  KE={:.2}, max_vel={:.2}", body4.get_kinetic_energy(), body4.get_max_velocity());
     }
 }

@@ -13,7 +13,7 @@ use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent};
 
 // Import from the portable core library
 use fem_core::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
-use fem_core::xpbd::XPBDSoftBody;
+use fem_core::xpbd::{XPBDSoftBody, CollisionSystem};
 use fem_core::math;
 use fem_core::fem;
 
@@ -106,6 +106,7 @@ fn create_xpbd_body(material: XPBDMaterial, x_offset: f32, y_offset: f32) -> XPB
 /// Simulation state
 struct Simulation {
     bodies: Vec<XPBDSoftBody>,
+    collision_system: CollisionSystem,
     renderer: Renderer,
     #[allow(dead_code)]
     triangles: Vec<u32>,
@@ -141,8 +142,12 @@ impl Simulation {
         renderer.set_mesh(&mesh.triangles, &line_indices);
         renderer.set_ground(GROUND_Y);
 
+        // Spatial hash collision system (O(1) neighbor lookup)
+        let collision_system = CollisionSystem::new(0.25);
+
         Ok(Simulation {
             bodies,
+            collision_system,
             renderer,
             triangles: mesh.triangles,
             line_indices,
@@ -191,9 +196,6 @@ impl Simulation {
         let delta_time = delta_time.min(MAX_FRAME_TIME);
         self.accumulator += delta_time;
 
-        // Collision distance threshold (based on mesh density)
-        let collision_dist = 0.25;
-
         // Run fixed timestep physics updates
         while self.accumulator >= FIXED_DT {
             let substep_dt = (FIXED_DT / SUBSTEPS as f64) as f32;
@@ -213,13 +215,8 @@ impl Simulation {
                     body.substep_pre(substep_dt, GRAVITY, Some(GROUND_Y));
                 }
 
-                // Inter-body collisions BEFORE post_solve (so velocities are correct)
-                for i in 0..self.bodies.len() {
-                    for j in (i + 1)..self.bodies.len() {
-                        let (left, right) = self.bodies.split_at_mut(j);
-                        left[i].collide_with_body(&mut right[0], collision_dist);
-                    }
-                }
+                // Inter-body collisions using spatial hash (O(n) instead of O(n²))
+                self.collision_system.solve_collisions(&mut self.bodies);
 
                 // Finalize substep: derive velocities from position change
                 for body in &mut self.bodies {

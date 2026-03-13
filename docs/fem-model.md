@@ -173,20 +173,31 @@ if vertex.y < ground_y:
 
 ### Inter-Body Collision
 
-Vertex-to-vertex collision with mass-weighted separation:
+Uses a **spatial hash grid** for O(1) neighbor lookup instead of O(n²) pairwise checks.
 
 ```python
-for each vertex pair (i, j) from different bodies:
-    dist = distance(i, j)
-    if dist < min_dist:
-        overlap = min_dist - dist
-        normal = normalize(j.pos - i.pos)
+# Build spatial hash (cell size = 2 * collision_distance)
+hash_grid.clear()
+for body_idx, body in enumerate(bodies):
+    for vert_idx, vertex in enumerate(body.vertices):
+        cell = hash(vertex.pos / cell_size)
+        hash_grid[cell].append((body_idx, vert_idx))
 
-        # Mass-weighted separation
-        w_sum = i.inv_mass + j.inv_mass
-        i.pos -= normal * overlap * (i.inv_mass / w_sum)
-        j.pos += normal * overlap * (j.inv_mass / w_sum)
+# Query neighbors and resolve collisions
+for vertex in all_vertices:
+    for neighbor in hash_grid.query_3x3_neighborhood(vertex.pos):
+        if different_bodies and distance < min_dist:
+            # Mass-weighted separation
+            overlap = min_dist - distance
+            w_sum = v1.inv_mass + v2.inv_mass
+            v1.pos -= normal * overlap * (v1.inv_mass / w_sum)
+            v2.pos += normal * overlap * (v2.inv_mass / w_sum)
 ```
+
+**Complexity:**
+- Build hash: O(n) where n = total vertices
+- Query: O(1) average per vertex
+- Total: O(n) vs O(n²) for naive approach
 
 **Important:** Collisions must happen **before** post_solve so that velocities correctly reflect the collision response.
 

@@ -7,7 +7,141 @@
 //! - "XPBD: Position-Based Simulation of Compliant Constrained Dynamics" (Macklin et al. 2016)
 //! - Ten Minute Physics XPBD tutorial
 
-// Note: math module not directly used, but kept for potential future use
+use std::collections::HashMap;
+
+/// Spatial hash grid for O(1) neighbor queries in collision detection
+pub struct SpatialHash {
+    cell_size: f32,
+    cells: HashMap<(i32, i32), Vec<(usize, usize)>>,  // (body_idx, vert_idx)
+}
+
+impl SpatialHash {
+    pub fn new(cell_size: f32) -> Self {
+        SpatialHash {
+            cell_size,
+            cells: HashMap::new(),
+        }
+    }
+
+    #[inline]
+    fn hash(&self, x: f32, y: f32) -> (i32, i32) {
+        let cx = (x / self.cell_size).floor() as i32;
+        let cy = (y / self.cell_size).floor() as i32;
+        (cx, cy)
+    }
+
+    pub fn clear(&mut self) {
+        self.cells.clear();
+    }
+
+    pub fn insert(&mut self, body_idx: usize, vert_idx: usize, x: f32, y: f32) {
+        let key = self.hash(x, y);
+        self.cells.entry(key).or_insert_with(Vec::new).push((body_idx, vert_idx));
+    }
+
+    /// Get all entries in cell and neighboring cells
+    pub fn query_neighbors(&self, x: f32, y: f32) -> impl Iterator<Item = &(usize, usize)> {
+        let (cx, cy) = self.hash(x, y);
+        // Check 3x3 neighborhood
+        (-1..=1).flat_map(move |dx| {
+            (-1..=1).flat_map(move |dy| {
+                self.cells.get(&(cx + dx, cy + dy))
+                    .map(|v| v.iter())
+                    .into_iter()
+                    .flatten()
+            })
+        })
+    }
+}
+
+/// Collision system for handling multi-body collisions efficiently
+pub struct CollisionSystem {
+    hash: SpatialHash,
+    min_dist: f32,
+}
+
+impl CollisionSystem {
+    pub fn new(min_dist: f32) -> Self {
+        CollisionSystem {
+            hash: SpatialHash::new(min_dist * 2.0),  // Cell size = 2x collision distance
+            min_dist,
+        }
+    }
+
+    /// Detect and resolve collisions between all bodies using spatial hashing
+    pub fn solve_collisions(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
+        self.hash.clear();
+
+        // Insert all vertices into spatial hash
+        for (body_idx, body) in bodies.iter().enumerate() {
+            for vert_idx in 0..body.num_verts {
+                if body.inv_mass[vert_idx] == 0.0 { continue; }
+                let x = body.pos[vert_idx * 2];
+                let y = body.pos[vert_idx * 2 + 1];
+                self.hash.insert(body_idx, vert_idx, x, y);
+            }
+        }
+
+        let mut total_collisions = 0u32;
+        let min_dist_sq = self.min_dist * self.min_dist;
+
+        // For each body and vertex, query neighbors
+        for body_idx in 0..bodies.len() {
+            for vert_idx in 0..bodies[body_idx].num_verts {
+                let w1 = bodies[body_idx].inv_mass[vert_idx];
+                if w1 == 0.0 { continue; }
+
+                let x1 = bodies[body_idx].pos[vert_idx * 2];
+                let y1 = bodies[body_idx].pos[vert_idx * 2 + 1];
+
+                // Collect neighbors to avoid borrow issues
+                let neighbors: Vec<(usize, usize)> = self.hash.query_neighbors(x1, y1)
+                    .filter(|&&(b, v)| {
+                        // Only check other bodies, and avoid duplicate pairs
+                        b > body_idx || (b == body_idx && v > vert_idx)
+                    })
+                    .cloned()
+                    .collect();
+
+                for (other_body_idx, other_vert_idx) in neighbors {
+                    // Skip same-body collisions (handled by constraints)
+                    if body_idx == other_body_idx { continue; }
+
+                    let w2 = bodies[other_body_idx].inv_mass[other_vert_idx];
+                    if w2 == 0.0 { continue; }
+
+                    let x2 = bodies[other_body_idx].pos[other_vert_idx * 2];
+                    let y2 = bodies[other_body_idx].pos[other_vert_idx * 2 + 1];
+
+                    let dx = x2 - x1;
+                    let dy = y2 - y1;
+                    let dist_sq = dx * dx + dy * dy;
+
+                    if dist_sq < min_dist_sq && dist_sq > 1e-10 {
+                        total_collisions += 1;
+
+                        let dist = dist_sq.sqrt();
+                        let overlap = self.min_dist - dist;
+
+                        let nx = dx / dist;
+                        let ny = dy / dist;
+
+                        let w_sum = w1 + w2;
+                        let corr1 = overlap * (w1 / w_sum);
+                        let corr2 = overlap * (w2 / w_sum);
+
+                        bodies[body_idx].pos[vert_idx * 2] -= nx * corr1;
+                        bodies[body_idx].pos[vert_idx * 2 + 1] -= ny * corr1;
+                        bodies[other_body_idx].pos[other_vert_idx * 2] += nx * corr2;
+                        bodies[other_body_idx].pos[other_vert_idx * 2 + 1] += ny * corr2;
+                    }
+                }
+            }
+        }
+
+        total_collisions
+    }
+}
 
 /// Edge constraint data
 #[derive(Clone, Debug)]
