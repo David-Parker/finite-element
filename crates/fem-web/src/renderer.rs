@@ -129,7 +129,8 @@ impl Renderer {
 
         // Draw each body
         for (i, positions) in bodies.iter().enumerate() {
-            let (r, g, b) = colors.get(i).copied().unwrap_or((0.4, 0.8, 1.0));
+            // Cycle through colors if more bodies than colors
+            let (r, g, b) = colors[i % colors.len()];
 
             // Upload current positions
             gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.vertex_buffer));

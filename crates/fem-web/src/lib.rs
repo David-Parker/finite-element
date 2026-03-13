@@ -121,13 +121,18 @@ struct Simulation {
     current_material: XPBDMaterial,
 }
 
-// Colors for each body
-const BODY_COLORS: [(f32, f32, f32); 5] = [
+// Colors for bodies (cycles through these)
+const BODY_COLORS: [(f32, f32, f32); 10] = [
     (0.4, 0.8, 1.0),  // cyan
     (1.0, 0.6, 0.2),  // orange
     (0.5, 1.0, 0.5),  // green
     (1.0, 0.4, 0.7),  // pink
     (0.9, 0.9, 0.3),  // yellow
+    (0.7, 0.5, 1.0),  // purple
+    (1.0, 0.3, 0.3),  // red
+    (0.3, 0.7, 0.9),  // light blue
+    (0.9, 0.7, 0.5),  // tan
+    (0.6, 0.9, 0.7),  // mint
 ];
 
 impl Simulation {
@@ -162,13 +167,31 @@ impl Simulation {
     }
 
     fn create_bodies(material: XPBDMaterial) -> Vec<XPBDSoftBody> {
-        vec![
-            create_xpbd_body(material, 0.0, START_HEIGHT + 16.0),
-            create_xpbd_body(material, -0.5, START_HEIGHT + 12.0),
-            create_xpbd_body(material, 0.5, START_HEIGHT + 8.0),
-            create_xpbd_body(material, -0.3, START_HEIGHT + 4.0),
-            create_xpbd_body(material, 0.3, START_HEIGHT),
-        ]
+        let mut bodies = Vec::with_capacity(25);
+
+        // 5 rings on the ground (spread horizontally)
+        let ground_rest_y = GROUND_Y + OUTER_RADIUS + 0.1;
+        bodies.push(create_xpbd_body(material, -6.0, ground_rest_y));
+        bodies.push(create_xpbd_body(material, -3.0, ground_rest_y));
+        bodies.push(create_xpbd_body(material, 0.0, ground_rest_y));
+        bodies.push(create_xpbd_body(material, 3.0, ground_rest_y));
+        bodies.push(create_xpbd_body(material, 6.0, ground_rest_y));
+
+        // 20 rings falling from above (4 columns x 5 rows)
+        let drop_start = START_HEIGHT + 5.0;
+        let vertical_spacing = 4.0;  // Space between rows
+        let horizontal_positions = [-4.5, -1.5, 1.5, 4.5];
+
+        for row in 0..5 {
+            for (col, &x) in horizontal_positions.iter().enumerate() {
+                let y = drop_start + (row as f32) * vertical_spacing;
+                // Add slight offset to break symmetry
+                let x_offset = ((row + col) % 3) as f32 * 0.2 - 0.2;
+                bodies.push(create_xpbd_body(material, x + x_offset, y));
+            }
+        }
+
+        bodies
     }
 
     fn reset(&mut self) {
