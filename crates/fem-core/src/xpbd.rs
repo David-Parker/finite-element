@@ -9,6 +9,11 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "simd")]
+use crate::compute::simd::SimdBackend;
+#[cfg(feature = "simd")]
+use crate::compute::ComputeBackend;
+
 /// Spatial hash grid for O(1) neighbor queries in collision detection
 pub struct SpatialHash {
     cell_size: f32,
@@ -308,6 +313,20 @@ impl XPBDSoftBody {
     }
 
     /// Pre-solve: apply external forces and predict positions
+    #[cfg(feature = "simd")]
+    pub fn pre_solve(&mut self, dt: f32, gravity: f32) {
+        SimdBackend::integrate_gravity(
+            &mut self.pos,
+            &mut self.vel,
+            &mut self.prev_pos,
+            gravity,
+            dt,
+            &self.inv_mass,
+        );
+    }
+
+    /// Pre-solve: apply external forces and predict positions (scalar fallback)
+    #[cfg(not(feature = "simd"))]
     pub fn pre_solve(&mut self, dt: f32, gravity: f32) {
         for i in 0..self.num_verts {
             if self.inv_mass[i] == 0.0 {
@@ -500,6 +519,13 @@ impl XPBDSoftBody {
     }
 
     /// Post-solve: compute velocities from position change
+    #[cfg(feature = "simd")]
+    pub fn post_solve(&mut self, dt: f32) {
+        SimdBackend::derive_velocities(&self.pos, &self.prev_pos, &mut self.vel, dt);
+    }
+
+    /// Post-solve: compute velocities from position change (scalar fallback)
+    #[cfg(not(feature = "simd"))]
     pub fn post_solve(&mut self, dt: f32) {
         let inv_dt = 1.0 / dt;
 
