@@ -10,7 +10,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use std::cell::RefCell;
 use std::rc::Rc;
-use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent};
+use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, KeyboardEvent, MouseEvent};
 
 // Import from the portable core library
 use fem_core::mesh::{create_ring_mesh, create_ring_wireframe, offset_vertices};
@@ -120,6 +120,10 @@ struct Simulation {
     fps: f64,
     tracer: Tracer,
     current_material: XPBDMaterial,
+    // Mouse attractor
+    attractor_active: bool,
+    attractor_x: f32,
+    attractor_y: f32,
 }
 
 // Colors for bodies (cycles through these)
@@ -168,6 +172,9 @@ impl Simulation {
             fps: 0.0,
             tracer: Tracer::new(),
             current_material,
+            attractor_active: false,
+            attractor_x: 0.0,
+            attractor_y: 0.0,
         })
     }
 
@@ -239,6 +246,29 @@ impl Simulation {
 
             self.profiler.begin("substeps");
             for _substep in 0..SUBSTEPS {
+                // Apply attractor acceleration if active
+                if self.attractor_active {
+                    const ATTRACTOR_STRENGTH: f32 = 25.0;
+                    const MIN_DIST: f32 = 3.0;  // Don't pull harder when closer than this
+                    for body in &mut self.bodies {
+                        // Get body center
+                        let (cx, cy) = body.get_center();
+                        // Direction to attractor
+                        let dx = self.attractor_x - cx;
+                        let dy = self.attractor_y - cy;
+                        let dist = (dx * dx + dy * dy).sqrt().max(MIN_DIST);
+                        // Apply velocity change towards attractor (normalized direction)
+                        let ax = (dx / dist) * ATTRACTOR_STRENGTH * substep_dt;
+                        let ay = (dy / dist) * ATTRACTOR_STRENGTH * substep_dt;
+                        for i in 0..body.num_verts {
+                            if body.inv_mass[i] > 0.0 {
+                                body.vel[i * 2] += ax;
+                                body.vel[i * 2 + 1] += ay;
+                            }
+                        }
+                    }
+                }
+
                 // Pre-solve and constraints for all bodies
                 self.profiler.begin("constraints");
                 for body in &mut self.bodies {
@@ -325,6 +355,19 @@ impl Simulation {
     fn toggle_profiler(&mut self) {
         self.profiler.toggle();
     }
+
+    fn set_attractor(&mut self, x: f32, y: f32) {
+        self.attractor_x = x;
+        self.attractor_y = y;
+    }
+
+    fn start_attracting(&mut self) {
+        self.attractor_active = true;
+    }
+
+    fn stop_attracting(&mut self) {
+        self.attractor_active = false;
+    }
 }
 
 #[wasm_bindgen(start)]
@@ -383,6 +426,65 @@ pub fn main() -> Result<(), JsValue> {
         }) as Box<dyn FnMut(_)>);
 
         document.add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    // Set up mouse handlers for attractor
+    let canvas_width = canvas.width() as f32;
+    let canvas_height = canvas.height() as f32;
+    let view_size = 10.0f32;  // Must match renderer's view_size
+
+    // Helper to convert screen coords to world coords
+    let screen_to_world = move |screen_x: f32, screen_y: f32| -> (f32, f32) {
+        // screen (0,0) is top-left, world (0,0) is center
+        let world_x = (screen_x / canvas_width - 0.5) * 2.0 * view_size;
+        let world_y = -(screen_y / canvas_height - 0.5) * 2.0 * view_size;
+        (world_x, world_y)
+    };
+
+    // Mouse down - start attracting
+    {
+        let sim = simulation.clone();
+        let convert = screen_to_world;
+        let closure = Closure::wrap(Box::new(move |event: MouseEvent| {
+            let (wx, wy) = convert(event.offset_x() as f32, event.offset_y() as f32);
+            let mut sim = sim.borrow_mut();
+            sim.set_attractor(wx, wy);
+            sim.start_attracting();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    // Mouse move - update attractor position
+    {
+        let sim = simulation.clone();
+        let convert = screen_to_world;
+        let closure = Closure::wrap(Box::new(move |event: MouseEvent| {
+            let (wx, wy) = convert(event.offset_x() as f32, event.offset_y() as f32);
+            sim.borrow_mut().set_attractor(wx, wy);
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    // Mouse up - stop attracting
+    {
+        let sim = simulation.clone();
+        let closure = Closure::wrap(Box::new(move |_event: MouseEvent| {
+            sim.borrow_mut().stop_attracting();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mouseup", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    // Mouse leave - stop attracting
+    {
+        let sim = simulation.clone();
+        let closure = Closure::wrap(Box::new(move |_event: MouseEvent| {
+            sim.borrow_mut().stop_attracting();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mouseleave", closure.as_ref().unchecked_ref())?;
         closure.forget();
     }
 

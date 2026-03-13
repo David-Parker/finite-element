@@ -28,6 +28,7 @@ features = [
     "WebGlBuffer",
     "WebGlUniformLocation",
     "KeyboardEvent",
+    "MouseEvent",
     "Performance",
     "Blob",
     "Url",

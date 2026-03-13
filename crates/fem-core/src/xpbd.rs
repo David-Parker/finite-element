@@ -648,6 +648,18 @@ impl XPBDSoftBody {
         (min_x, min_y, max_x, max_y)
     }
 
+    /// Get center of mass (average position)
+    pub fn get_center(&self) -> (f32, f32) {
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        for i in 0..self.num_verts {
+            cx += self.pos[i * 2];
+            cy += self.pos[i * 2 + 1];
+        }
+        let n = self.num_verts as f32;
+        (cx / n, cy / n)
+    }
+
     /// Collide with another XPBD body - position-based separation
     /// Call this BEFORE post_solve so velocities are derived correctly
     pub fn collide_with_body(&mut self, other: &mut XPBDSoftBody, min_dist: f32) -> u32 {
