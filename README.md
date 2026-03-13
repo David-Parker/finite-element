@@ -102,8 +102,8 @@ crates/
       xpbd.rs         # XPBD solver: constraints, collision, integration
       mesh.rs         # Mesh generation (ring, square)
       math.rs         # 2x2 matrix and 2D vector operations
-      fem.rs          # Neo-Hookean stress (legacy, for reference)
-      softbody.rs     # Force-based solver (legacy, for reference)
+      compute.rs      # SIMD-accelerated compute backends
+      trace.rs        # Simulation tracing/profiling
   fem-web/            # WebAssembly application
     src/
       lib.rs          # WASM entry point, simulation loop
@@ -130,8 +130,8 @@ See [docs/fem-model.md](docs/fem-model.md) for detailed documentation:
 
 - XPBD algorithm and constraint solving
 - Edge and area constraint mathematics
-- Collision handling
-- Comparison with force-based FEM
+- Collision handling with spatial hashing
+- Material parameters and compliance
 
 ## References
 

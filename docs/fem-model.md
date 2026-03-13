@@ -266,20 +266,6 @@ XPBD's compliance formulation makes behavior timestep-independent:
 
 As `dt → 0`, the compliance term `α/dt²` dominates, giving consistent stiffness.
 
-## Comparison with Neo-Hookean FEM
-
-The codebase includes a legacy force-based FEM solver (`softbody.rs`) using Neo-Hookean hyperelasticity. Key differences:
-
-| Aspect | Neo-Hookean FEM | XPBD |
-|--------|-----------------|------|
-| Physics basis | Continuum mechanics | Constraint projection |
-| Stress computation | P = μF + (λlog(J) - μ)F⁻ᵀ | None (position-based) |
-| Material model | Strain energy density | Compliance parameters |
-| Large deformation | Requires strain limiting | Naturally handled |
-| Implementation | ~200 lines | ~150 lines |
-
-XPBD trades physical accuracy for stability and simplicity. For real-time soft body simulation, this trade-off is usually worthwhile.
-
 ## References
 
 1. Macklin, M., Müller, M., & Chentanez, N. (2016). XPBD: Position-Based Simulation of Compliant Constrained Dynamics. Motion in Games.
