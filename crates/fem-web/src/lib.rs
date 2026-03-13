@@ -4,6 +4,7 @@
 
 mod renderer;
 mod trace;
+mod profiler;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -19,6 +20,7 @@ use fem_core::fem;
 
 use crate::renderer::Renderer;
 use crate::trace::Tracer;
+use crate::profiler::Profiler;
 
 // Configuration
 const SEGMENTS: u32 = 16;        // 128 triangles (16 * 4 * 2 = 128)
@@ -108,6 +110,7 @@ struct Simulation {
     bodies: Vec<XPBDSoftBody>,
     collision_system: CollisionSystem,
     renderer: Renderer,
+    profiler: Profiler,
     #[allow(dead_code)]
     triangles: Vec<u32>,
     #[allow(dead_code)]
@@ -150,10 +153,14 @@ impl Simulation {
         // Spatial hash collision system (O(1) neighbor lookup)
         let collision_system = CollisionSystem::new(0.25);
 
+        // Profiler reports every 60 frames
+        let profiler = Profiler::new(60);
+
         Ok(Simulation {
             bodies,
             collision_system,
             renderer,
+            profiler,
             triangles: mesh.triangles,
             line_indices,
             paused: false,
@@ -232,31 +239,28 @@ impl Simulation {
                 ).into());
             }
 
+            self.profiler.begin("substeps");
             for _ in 0..SUBSTEPS {
                 // Pre-solve and constraints for all bodies
+                self.profiler.begin("constraints");
                 for body in &mut self.bodies {
                     body.substep_pre(substep_dt, GRAVITY, Some(GROUND_Y));
                 }
+                self.profiler.end("constraints");
 
-                // Inter-body collisions using spatial hash (O(n) instead of O(n²))
+                // Inter-body collisions using spatial hash
+                self.profiler.begin("collisions");
                 self.collision_system.solve_collisions(&mut self.bodies);
+                self.profiler.end("collisions");
 
                 // Finalize substep: derive velocities from position change
+                self.profiler.begin("post_solve");
                 for body in &mut self.bodies {
                     body.substep_post(substep_dt);
                 }
+                self.profiler.end("post_solve");
             }
-
-            // No damping - let objects bounce naturally
-
-            // Debug: log state after substeps
-            if self.frame_count < 5 {
-                let ke_after: f32 = self.bodies.iter().map(|b| b.get_kinetic_energy()).sum();
-                console::log_1(&format!(
-                    "  After: KE={:.2}",
-                    ke_after
-                ).into());
-            }
+            self.profiler.end("substeps");
 
             // Only sleep if object is on the ground and has very low energy
             for body in &mut self.bodies {
@@ -272,9 +276,12 @@ impl Simulation {
         }
     }
 
-    fn render(&self) {
+    fn render(&mut self) {
+        self.profiler.begin("render");
         let positions: Vec<&[f32]> = self.bodies.iter().map(|b| b.pos.as_slice()).collect();
         self.renderer.render_bodies(&positions, &BODY_COLORS);
+        self.profiler.end("render");
+        self.profiler.end_frame();
     }
 
     fn toggle_pause(&mut self) {
@@ -316,6 +323,10 @@ impl Simulation {
     fn toggle_tracing(&mut self) {
         self.tracer.toggle();
     }
+
+    fn toggle_profiler(&mut self) {
+        self.profiler.toggle();
+    }
 }
 
 #[wasm_bindgen(start)]
@@ -350,6 +361,9 @@ pub fn main() -> Result<(), JsValue> {
                 }
                 "t" => {
                     sim.borrow_mut().toggle_tracing();
+                }
+                "p" => {
+                    sim.borrow_mut().toggle_profiler();
                 }
                 "1" => {
                     sim.borrow_mut().set_material(XPBDMaterial::JELLO);
