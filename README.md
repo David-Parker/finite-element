@@ -2,6 +2,10 @@
 
 A real-time soft body physics simulation using **XPBD (Extended Position-Based Dynamics)** for unconditionally stable simulation, written in Rust and compiled to WebAssembly.
 
+<p align="center">
+  <img src="media/shapes.gif" alt="Mixed Shapes" width="600"/>
+</p>
+
 <table>
   <tr>
     <td><img src="media/xpbd.gif" alt="XPBD Simulation" width="400"/></td>
@@ -9,9 +13,6 @@ A real-time soft body physics simulation using **XPBD (Extended Position-Based D
   </tr>
   <tr>
     <td><img src="media/collisions.gif" alt="Collisions" width="400"/></td>
-    <td><img src="media/shapes.gif" alt="Mixed Shapes" width="400"/></td>
-  </tr>
-  <tr>
     <td><img src="media/fem.gif" alt="FEM Simulation" width="400"/></td>
   </tr>
 </table>
