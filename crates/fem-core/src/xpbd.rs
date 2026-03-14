@@ -85,8 +85,11 @@ pub struct CollisionSystem {
 
 impl CollisionSystem {
     pub fn new(min_dist: f32) -> Self {
+        // Cell size should be large enough to find edges from any nearby vertex
+        // Use larger cells to ensure long edges are found
+        let cell_size = 0.8;  // Fixed cell size that works for typical edge lengths
         CollisionSystem {
-            edge_hash: SpatialHash::new(min_dist * 2.0),
+            edge_hash: SpatialHash::new(cell_size),
             min_dist,
             aabbs: Vec::with_capacity(32),
             overlapping_pairs: Vec::with_capacity(64),
@@ -103,7 +106,17 @@ impl CollisionSystem {
 
     /// Detect and resolve collisions between all bodies using spatial hashing
     /// Uses vertex-edge collision with edge spatial hash for efficiency
+    /// Runs multiple iterations for better separation
     pub fn solve_collisions(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
+        let mut total = 0;
+        // Multiple iterations help resolve deep penetrations
+        for _ in 0..3 {
+            total += self.solve_collisions_once(bodies);
+        }
+        total
+    }
+
+    fn solve_collisions_once(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
         let num_bodies = bodies.len();
 
         // Step 1: Compute AABBs for all bodies
@@ -174,9 +187,10 @@ impl CollisionSystem {
                     w1,
                 });
 
-                // Insert edge midpoint into spatial hash
-                // Use body_idx in first slot, edge_idx in second
-                self.edge_hash.insert(body_idx, edge_idx, mid_x, mid_y);
+                // Insert edge at BOTH endpoints to ensure it's found from any nearby vertex
+                // This is critical for long edges that span multiple cells
+                self.edge_hash.insert(body_idx, edge_idx, e0x, e0y);
+                self.edge_hash.insert(body_idx, edge_idx, e1x, e1y);
             }
         }
 
@@ -963,7 +977,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.02;
+        let collision_dist = 0.15;
 
         // Run 10 seconds
         for frame in 0..600 {
@@ -1020,7 +1034,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.02;
+        let collision_dist = 0.15;
 
         // Run 10 seconds (600 frames)
         for frame in 0..600 {
@@ -1146,7 +1160,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.02;
+        let collision_dist = 0.15;
 
         // Run 10 seconds (600 frames)
         for frame in 0..600 {
@@ -1356,7 +1370,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.02;
+        let collision_dist = 0.15;
 
         // Run 10 seconds
         for frame in 0..600 {
@@ -1390,5 +1404,179 @@ mod tests {
         }
 
         println!("XPBD mixed shape collision test passed!");
+    }
+
+    /// Test that collisions actually prevent penetration
+    #[test]
+    fn test_collision_prevents_penetration() {
+        let mesh = create_ring_mesh(1.5, 1.0, 16, 4);
+
+        // Two bodies, one directly above the other
+        let mut body1 = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+        let mut body2 = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+
+        // Body1 at y=6, Body2 at y=2 (will collide when body1 falls)
+        for i in 0..body1.num_verts {
+            body1.pos[i * 2 + 1] += 6.0;
+            body1.prev_pos[i * 2 + 1] += 6.0;
+        }
+        for i in 0..body2.num_verts {
+            body2.pos[i * 2 + 1] += 2.0;
+            body2.prev_pos[i * 2 + 1] += 2.0;
+        }
+
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+        let collision_dist = 0.15;
+
+        // Run 3 seconds - enough for collision to occur
+        for _ in 0..180 {
+            for _ in 0..8 {
+                body1.substep_pre(dt, -9.8, Some(ground_y));
+                body2.substep_pre(dt, -9.8, Some(ground_y));
+                body1.collide_with_body(&mut body2, collision_dist);
+                body1.substep_post(dt);
+                body2.substep_post(dt);
+            }
+        }
+
+        // Verify bodies didn't pass through each other
+        // Body1 center should still be above body2 center
+        let (_, cy1) = body1.get_center();
+        let (_, cy2) = body2.get_center();
+
+        assert!(
+            cy1 > cy2,
+            "Bodies penetrated! Body1 center y={:.2}, Body2 center y={:.2}",
+            cy1, cy2
+        );
+
+        // Bodies should maintain some minimum separation (at least body diameter minus compression)
+        let separation = cy1 - cy2;
+        assert!(
+            separation > 1.0,  // At least 1 unit apart (bodies have ~3 unit diameter)
+            "Bodies too close! Separation={:.2}", separation
+        );
+
+        println!("Collision penetration test passed. Separation: {:.2}", separation);
+    }
+
+    /// Test that falling body bounces off stationary body
+    #[test]
+    fn test_collision_momentum_transfer() {
+        let mesh = create_ring_mesh(1.5, 1.0, 16, 4);
+
+        // Falling body
+        let mut falling = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+        // Stationary body (will be pushed by collision)
+        let mut stationary = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+
+        // Falling body at y=10, stationary at y=2
+        for i in 0..falling.num_verts {
+            falling.pos[i * 2 + 1] += 10.0;
+            falling.prev_pos[i * 2 + 1] += 10.0;
+        }
+        for i in 0..stationary.num_verts {
+            stationary.pos[i * 2 + 1] += 2.0;
+            stationary.prev_pos[i * 2 + 1] += 2.0;
+        }
+
+        let (_, initial_stationary_y) = stationary.get_center();
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+        let collision_dist = 0.15;
+
+        // Run until collision happens and momentum transfers
+        let mut collision_occurred = false;
+        for frame in 0..300 {
+            for _ in 0..8 {
+                falling.substep_pre(dt, -9.8, Some(ground_y));
+                stationary.substep_pre(dt, -9.8, Some(ground_y));
+                let collisions = falling.collide_with_body(&mut stationary, collision_dist);
+                if collisions > 0 {
+                    collision_occurred = true;
+                }
+                falling.substep_post(dt);
+                stationary.substep_post(dt);
+            }
+
+            // Check after collision that stationary body moved
+            if collision_occurred && frame > 60 {
+                let (_, current_stationary_y) = stationary.get_center();
+                // Stationary body should have been pushed down
+                assert!(
+                    current_stationary_y < initial_stationary_y,
+                    "Stationary body should move down after collision. Initial: {:.2}, Current: {:.2}",
+                    initial_stationary_y, current_stationary_y
+                );
+                println!("Collision momentum test passed. Stationary body moved from {:.2} to {:.2}",
+                    initial_stationary_y, current_stationary_y);
+                return;
+            }
+        }
+
+        assert!(collision_occurred, "No collision occurred during test");
+    }
+
+    /// Test CollisionSystem with multiple bodies
+    #[test]
+    fn test_collision_system_separation() {
+        let mesh = create_ring_mesh(1.5, 1.0, 16, 4);
+
+        // Stack 3 bodies vertically
+        let mut bodies: Vec<XPBDSoftBody> = Vec::new();
+        for (i, y) in [2.0, 6.0, 10.0].iter().enumerate() {
+            let mut body = XPBDSoftBody::new(
+                &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+            );
+            for j in 0..body.num_verts {
+                body.pos[j * 2 + 1] += y;
+                body.prev_pos[j * 2 + 1] += y;
+            }
+            bodies.push(body);
+        }
+
+        let mut collision_system = CollisionSystem::new(0.1);
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+
+        // Run 5 seconds
+        for _ in 0..300 {
+            for _ in 0..8 {
+                for body in &mut bodies {
+                    body.substep_pre(dt, -9.8, Some(ground_y));
+                }
+                collision_system.solve_collisions(&mut bodies);
+                for body in &mut bodies {
+                    body.substep_post(dt);
+                    body.apply_damping(0.01);
+                }
+            }
+        }
+
+        // Verify all bodies are separated (none passed through each other)
+        let centers: Vec<f32> = bodies.iter().map(|b| b.get_center().1).collect();
+
+        // All bodies should have distinct y positions
+        for i in 0..centers.len() {
+            for j in (i + 1)..centers.len() {
+                let diff = (centers[i] - centers[j]).abs();
+                assert!(
+                    diff > 0.5,  // At least 0.5 units apart
+                    "Bodies {} and {} too close: y1={:.2}, y2={:.2}, diff={:.2}",
+                    i, j, centers[i], centers[j], diff
+                );
+            }
+        }
+
+        println!("CollisionSystem separation test passed. Centers: {:?}", centers);
     }
 }

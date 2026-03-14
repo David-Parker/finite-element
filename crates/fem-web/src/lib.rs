@@ -171,8 +171,8 @@ impl Simulation {
         let mut renderer = Renderer::new(gl)?;
         renderer.set_ground(GROUND_Y);
 
-        // Spatial hash collision system - small min_dist so objects visually touch
-        let collision_system = CollisionSystem::new(0.02);
+        // Spatial hash collision system
+        let collision_system = CollisionSystem::new(0.15);
 
         // Profiler reports every 60 frames
         let profiler = Profiler::new(60);
