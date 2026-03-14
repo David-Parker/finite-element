@@ -13,18 +13,18 @@ use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, HtmlImageElemen
 use fem_core::{PhysicsWorld, BodyHandle, BodyConfig, Material};
 use fem_core::mesh::create_ring_mesh;
 
-/// Player donut material - softer and squishier
+/// Player donut material - very soft and squishy
 const PLAYER_MATERIAL: Material = Material {
-    density: 950.0,           // Lighter = bouncier response
-    edge_compliance: 5e-7,    // Softer edges - more wobble
-    area_compliance: 5e-7,    // Softer volume - more squish
+    density: 950.0,
+    edge_compliance: 1e-6,    // Very soft edges
+    area_compliance: 1e-6,    // Very squishy
 };
 
-/// Dropped donut material - soft like player but smaller
+/// Dropped donut material - soft and wobbly
 const DROPPED_MATERIAL: Material = Material {
     density: 950.0,
     edge_compliance: 5e-7,    // Same softness as player
-    area_compliance: 5e-7,
+    area_compliance: 2e-7,    // Slightly stiffer area to prevent collapse
 };
 
 use crate::renderer::{Renderer, BodyRenderData};
@@ -47,7 +47,7 @@ const MAX_HORIZONTAL_SPEED: f32 = 12.0;
 const MAX_JUMP_CHARGE: f32 = 1.0;  // seconds to full charge
 const JUMP_CHARGE_RATE: f32 = 2.0; // charge per second
 const MAX_COMPRESSION: f32 = 0.4;  // maximum compression ratio (40%)
-const JUMP_IMPULSE: f32 = 20.0;    // base jump velocity
+const JUMP_IMPULSE: f32 = 12.0;    // base jump velocity
 
 // Camera
 const VIEW_WIDTH: f32 = 20.0;
