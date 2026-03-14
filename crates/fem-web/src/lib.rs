@@ -283,6 +283,12 @@ impl Simulation {
             }
 
             self.profiler.begin("substeps");
+
+            // Build collision data once per frame (broad phase + edge cache + hash)
+            self.profiler.begin("col_prepare");
+            self.collision_system.prepare(&self.bodies);
+            self.profiler.end("col_prepare");
+
             for _substep in 0..SUBSTEPS {
                 // Apply attractor acceleration if active
                 if self.attractor_active {
@@ -314,10 +320,10 @@ impl Simulation {
                 }
                 self.profiler.end("constraints");
 
-                // Inter-body collisions using spatial hash
-                self.profiler.begin("collisions");
-                self.collision_system.solve_collisions(&mut self.bodies);
-                self.profiler.end("collisions");
+                // Inter-body collisions: reuse prepared data, resolve with fresh positions
+                self.profiler.begin("col_resolve");
+                self.collision_system.resolve_collisions(&mut self.bodies);
+                self.profiler.end("col_resolve");
 
                 // Finalize substep: derive velocities from position change
                 self.profiler.begin("post_solve");
@@ -353,6 +359,17 @@ impl Simulation {
             .collect();
         self.renderer.render_meshes(&meshes, &BODY_COLORS);
         self.profiler.end("render");
+
+        // Log collision stats periodically
+        if self.frame_count % 60 == 0 && self.frame_count > 0 {
+            let cs = &self.collision_system;
+            console::log_1(&format!(
+                "COL STATS: pairs={} edges={} candidates={} collisions={} iters={}",
+                cs.stats_overlapping_pairs, cs.stats_cached_edges,
+                cs.stats_candidates, cs.stats_collisions_found, cs.stats_iterations_run
+            ).into());
+        }
+
         self.profiler.end_frame();
     }
 
