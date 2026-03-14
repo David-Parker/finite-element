@@ -164,7 +164,7 @@ const BODY_COLORS: [(f32, f32, f32); 10] = [
 
 impl Simulation {
     fn new(gl: WebGlRenderingContext) -> Result<Self, JsValue> {
-        let current_material = XPBDMaterial::BOUNCY_RUBBER;
+        let current_material = XPBDMaterial::METAL;
         // Create bodies with mixed shapes
         let (bodies, body_triangles) = Self::create_bodies(current_material);
 
