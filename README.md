@@ -9,6 +9,9 @@ A real-time soft body physics simulation using **XPBD (Extended Position-Based D
   </tr>
   <tr>
     <td><img src="media/collisions.gif" alt="Collisions" width="400"/></td>
+    <td><img src="media/shapes.gif" alt="Mixed Shapes" width="400"/></td>
+  </tr>
+  <tr>
     <td><img src="media/fem.gif" alt="FEM Simulation" width="400"/></td>
   </tr>
 </table>
