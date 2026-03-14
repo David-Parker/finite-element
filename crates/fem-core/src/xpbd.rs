@@ -946,12 +946,16 @@ impl XPBDSoftBody {
         c.abs()
     }
 
-    /// Solve ground collision as a simple position constraint
-    /// Just projects vertices out of ground - bounce happens from internal elasticity
+    /// Solve ground collision with Coulomb friction for realistic rolling
+    /// The contact point sticks to the ground (no slip) up to the friction limit
     pub fn solve_ground_collision(&mut self, ground_y: f32, _dt: f32) {
-        const FRICTION: f32 = 0.7;
-        const RESTITUTION: f32 = 0.3;
+        self.solve_ground_collision_with_friction(ground_y, 0.8, 0.3);
+    }
 
+    /// Solve ground collision with configurable friction and restitution
+    /// - friction: Coulomb friction coefficient (0 = ice, 1 = sticky rubber)
+    /// - restitution: bounciness (0 = no bounce, 1 = perfect bounce)
+    pub fn solve_ground_collision_with_friction(&mut self, ground_y: f32, friction: f32, restitution: f32) {
         for i in 0..self.num_verts {
             if self.inv_mass[i] == 0.0 {
                 continue;
@@ -962,23 +966,36 @@ impl XPBDSoftBody {
             if y < ground_y {
                 let prev_x = self.prev_pos[i * 2];
                 let prev_y = self.prev_pos[i * 2 + 1];
+                let curr_x = self.pos[i * 2];
 
-                // How far did we move this substep?
+                // Penetration depth (normal direction)
+                let penetration = ground_y - y;
+
+                // Tangent displacement this substep
+                let dx = curr_x - prev_x;
                 let dy = y - prev_y;
 
-                // Project out of ground
+                // Project out of ground (normal constraint)
                 self.pos[i * 2 + 1] = ground_y;
 
-                // If we were moving downward, reflect some velocity
+                // Apply restitution if moving into ground
                 if dy < 0.0 {
-                    // Position-based reflection: mirror the penetration
-                    let penetration = ground_y - y;
-                    self.pos[i * 2 + 1] = ground_y + penetration * RESTITUTION;
+                    self.pos[i * 2 + 1] = ground_y + penetration * restitution;
                 }
 
-                // Friction: reduce horizontal movement
-                let dx = self.pos[i * 2] - prev_x;
-                self.pos[i * 2] = prev_x + dx * FRICTION;
+                // Coulomb friction model:
+                // The friction force opposes sliding and is proportional to normal force.
+                // In PBD, we reduce tangent displacement by friction coefficient.
+                //
+                // For rolling to work, high friction means the contact point "sticks" to ground,
+                // which creates the torque needed for rolling motion.
+                //
+                // friction = 1.0: contact point doesn't move (perfect stick -> rolling)
+                // friction = 0.0: contact point slides freely (no rolling)
+
+                // Clamp the tangent displacement - this removes energy, never adds it
+                let friction_factor = 1.0 - friction;
+                self.pos[i * 2] = prev_x + dx * friction_factor;
             }
         }
     }
@@ -1039,6 +1056,18 @@ impl XPBDSoftBody {
 
     /// Pre-solve and constraint solving (call collide_with_body after this, then finalize_substep)
     pub fn substep_pre(&mut self, dt: f32, gravity: f32, ground_y: Option<f32>) {
+        self.substep_pre_with_friction(dt, gravity, ground_y, 0.8, 0.3);
+    }
+
+    /// Pre-solve with configurable ground friction and restitution
+    pub fn substep_pre_with_friction(
+        &mut self,
+        dt: f32,
+        gravity: f32,
+        ground_y: Option<f32>,
+        friction: f32,
+        restitution: f32,
+    ) {
         self.pre_solve(dt, gravity);
 
         // Solve constraints multiple times for stiff behavior
@@ -1047,9 +1076,9 @@ impl XPBDSoftBody {
             self.solve_constraints(dt);
         }
 
-        // Ground collision
+        // Ground collision with friction
         if let Some(gy) = ground_y {
-            self.solve_ground_collision(gy, dt);
+            self.solve_ground_collision_with_friction(gy, friction, restitution);
         }
     }
 
