@@ -20,11 +20,11 @@ const PLAYER_MATERIAL: Material = Material {
     area_compliance: 5e-7,    // Softer volume - more squish
 };
 
-/// Dropped donut material - stiffer to prevent crushing on smaller rings
+/// Dropped donut material - soft like player but smaller
 const DROPPED_MATERIAL: Material = Material {
     density: 950.0,
-    edge_compliance: 1e-8,    // Stiffer edges
-    area_compliance: 1e-8,    // Much stiffer area to prevent collapse
+    edge_compliance: 5e-7,    // Same softness as player
+    area_compliance: 5e-7,
 };
 
 use crate::renderer::{Renderer, BodyRenderData};

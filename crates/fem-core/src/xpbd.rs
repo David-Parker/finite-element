@@ -1079,6 +1079,10 @@ impl XPBDSoftBody {
         // Ground collision with friction
         if let Some(gy) = ground_y {
             self.solve_ground_collision_with_friction(gy, friction, restitution);
+            // Re-solve constraints after ground collision to restore shape
+            for _ in 0..3 {
+                self.solve_constraints(dt);
+            }
         }
     }
 
