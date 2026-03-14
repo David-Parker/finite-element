@@ -106,6 +106,9 @@ function __wbg_get_imports() {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
         },
+        __wbg_generateMipmap_3d721a217026f02d: function(arg0, arg1) {
+            arg0.generateMipmap(arg1 >>> 0);
+        },
         __wbg_getAttribLocation_d370b94a30ab917f: function(arg0, arg1, arg2, arg3) {
             const ret = arg0.getAttribLocation(arg1, getStringFromWasm0(arg2, arg3));
             return ret;
@@ -143,6 +146,10 @@ function __wbg_get_imports() {
         __wbg_getUniformLocation_90cdff44c2fceeb9: function(arg0, arg1, arg2, arg3) {
             const ret = arg0.getUniformLocation(arg1, getStringFromWasm0(arg2, arg3));
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbg_height_a6fcb48398bd1539: function(arg0) {
+            const ret = arg0.height;
+            return ret;
         },
         __wbg_instanceof_HtmlCanvasElement_26125339f936be50: function(arg0) {
             let result;
@@ -265,6 +272,10 @@ function __wbg_get_imports() {
         },
         __wbg_vertexAttribPointer_f63675d7fad431e6: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
             arg0.vertexAttribPointer(arg1 >>> 0, arg2, arg3 >>> 0, arg4 !== 0, arg5, arg6);
+        },
+        __wbg_width_462295a1353ea71b: function(arg0) {
+            const ret = arg0.width;
+            return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { dtor_idx: 18, function: Function { arguments: [NamedExternref("Event")], shim_idx: 21, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.

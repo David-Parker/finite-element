@@ -175,10 +175,24 @@ impl Renderer {
             image,
         )?;
 
+        // Check if texture is power-of-two (required for mipmaps in WebGL 1)
+        let width = image.width();
+        let height = image.height();
+        let is_pot = width.is_power_of_two() && height.is_power_of_two();
+
         // Set texture parameters
         gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_S, GL::CLAMP_TO_EDGE as i32);
         gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_T, GL::CLAMP_TO_EDGE as i32);
-        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR as i32);
+
+        if is_pot {
+            // Generate mipmaps for better quality when scaled down
+            gl.generate_mipmap(GL::TEXTURE_2D);
+            // Use trilinear filtering (linear mipmap + linear) to reduce aliasing
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR_MIPMAP_LINEAR as i32);
+        } else {
+            // NPOT textures can't have mipmaps in WebGL 1, use linear filtering
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR as i32);
+        }
         gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MAG_FILTER, GL::LINEAR as i32);
 
         Ok(texture)
