@@ -1979,4 +1979,151 @@ mod tests {
 
         println!("CollisionSystem separation test passed. Centers: {:?}", centers);
     }
+
+    /// Test soft ring under high-velocity ground impact
+    /// Verifies the ring doesn't permanently collapse
+    #[test]
+    fn test_high_velocity_impact_recovery() {
+        // Use exact game ring dimensions
+        let mesh = create_ring_mesh(1.01, 0.37, 16, 4);  // DROP_OUTER/INNER_RADIUS
+
+        // Soft material like the game uses
+        let edge_compliance = 1e-7;
+        let area_compliance = 5e-8;
+
+        let mut body = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 950.0, edge_compliance, area_compliance
+        );
+
+        // Position high and give high downward velocity (dropped from above camera)
+        let start_height = 15.0;
+        let impact_velocity = -25.0;  // Fast downward like dropped rings
+        for i in 0..body.num_verts {
+            body.pos[i * 2 + 1] += start_height;
+            body.prev_pos[i * 2 + 1] += start_height;
+            body.vel[i * 2 + 1] = impact_velocity;
+        }
+
+        // Measure initial shape
+        let (_, initial_max_y) = get_y_bounds(&body);
+        let initial_min_y_local = 0.0;  // Ring sits at origin before offset
+        let initial_height = initial_max_y - start_height - initial_min_y_local;
+        let mesh_height = 1.01 * 2.0;  // outer diameter
+        println!("Initial height (mesh): {:.3}", mesh_height);
+
+        let ground_y = -5.0;  // Game's GROUND_Y
+        let dt = 1.0 / 60.0;
+        let substeps = 4;  // Game uses 4 substeps
+        let substep_dt = dt / substeps as f32;
+
+        // Simulate 5 seconds
+        for frame in 0..300 {
+            for _ in 0..substeps {
+                body.substep_pre_with_friction(substep_dt, -15.0, Some(ground_y), 0.7, 0.0);
+                body.substep_post(substep_dt);
+            }
+
+            // Check shape at key moments
+            if frame == 10 || frame == 30 || frame == 60 || frame == 120 || frame == 299 {
+                let (min_y, max_y) = get_y_bounds(&body);
+                let height = max_y - min_y;
+                let height_ratio = height / mesh_height;
+                println!("Frame {}: height={:.3}, ratio={:.2}%", frame, height, height_ratio * 100.0);
+            }
+        }
+
+        // After settling, height should recover to at least 70% of original
+        let (_, final_max_y) = get_y_bounds(&body);
+        let (final_min_y, _) = get_y_bounds(&body);
+        let final_height = final_max_y - final_min_y;
+        let recovery_ratio = final_height / mesh_height;
+
+        println!("Final height: {:.3}, recovery: {:.1}%", final_height, recovery_ratio * 100.0);
+
+        assert!(
+            recovery_ratio > 0.7,
+            "Ring collapsed! Final height {:.3} is only {:.1}% of mesh height {:.3}",
+            final_height, recovery_ratio * 100.0, mesh_height
+        );
+    }
+
+    fn get_y_bounds(body: &XPBDSoftBody) -> (f32, f32) {
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for i in 0..body.num_verts {
+            let y = body.pos[i * 2 + 1];
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        (min_y, max_y)
+    }
+
+    /// Test multiple soft rings colliding and stacking
+    /// This reproduces the game's donut drop scenario
+    #[test]
+    fn test_stacked_soft_rings_recovery() {
+        let mesh = create_ring_mesh(1.01, 0.37, 16, 4);
+        let mesh_height = 1.01 * 2.0;
+
+        let edge_compliance = 1e-7;
+        let area_compliance = 5e-8;
+
+        // Create 5 rings at different heights, all falling
+        let mut bodies: Vec<XPBDSoftBody> = Vec::new();
+        for i in 0..5 {
+            let mut body = XPBDSoftBody::new(
+                &mesh.vertices, &mesh.triangles, 950.0, edge_compliance, area_compliance
+            );
+            let height = 5.0 + i as f32 * 4.0;  // Staggered heights
+            for j in 0..body.num_verts {
+                body.pos[j * 2 + 1] += height;
+                body.prev_pos[j * 2 + 1] += height;
+                body.vel[j * 2 + 1] = -15.0;  // Falling
+            }
+            bodies.push(body);
+        }
+
+        let mut collision_system = CollisionSystem::new(0.15);
+        let ground_y = -5.0;
+        let dt = 1.0 / 60.0;
+        let substeps = 4;
+        let substep_dt = dt / substeps as f32;
+
+        // Simulate 10 seconds
+        for frame in 0..600 {
+            for _ in 0..substeps {
+                for body in &mut bodies {
+                    body.substep_pre_with_friction(substep_dt, -15.0, Some(ground_y), 0.7, 0.0);
+                }
+                collision_system.solve_collisions(&mut bodies);
+                for body in &mut bodies {
+                    body.substep_post(substep_dt);
+                }
+            }
+
+            // Check shapes periodically
+            if frame == 60 || frame == 180 || frame == 599 {
+                println!("Frame {}:", frame);
+                for (i, body) in bodies.iter().enumerate() {
+                    let (min_y, max_y) = get_y_bounds(body);
+                    let height = max_y - min_y;
+                    let ratio = height / mesh_height;
+                    println!("  Ring {}: height={:.3}, ratio={:.1}%", i, height, ratio * 100.0);
+                }
+            }
+        }
+
+        // Check all rings maintained shape
+        for (i, body) in bodies.iter().enumerate() {
+            let (min_y, max_y) = get_y_bounds(body);
+            let height = max_y - min_y;
+            let ratio = height / mesh_height;
+            assert!(
+                ratio > 0.6,
+                "Ring {} collapsed! Height {:.3} is only {:.1}% of expected {:.3}",
+                i, height, ratio * 100.0, mesh_height
+            );
+        }
+        println!("All rings maintained shape!");
+    }
 }

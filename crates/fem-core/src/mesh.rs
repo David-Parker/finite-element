@@ -2,13 +2,61 @@
 
 use std::f32::consts::PI;
 
-/// Mesh data
+/// Mesh data for physics simulation
+///
+/// Positions are stored as a flat array for efficient physics computation.
+/// UV coordinates are optional and used for rendering with textures.
 pub struct Mesh {
-    pub vertices: Vec<f32>,   // Flat array [x0, y0, x1, y1, ...]
-    pub triangles: Vec<u32>,  // Triangle indices [i0, i1, i2, ...]
+    /// Vertex positions as flat array [x0, y0, x1, y1, ...]
+    pub vertices: Vec<f32>,
+    /// Triangle indices [i0, i1, i2, ...]
+    pub triangles: Vec<u32>,
+    /// Optional UV coordinates as flat array [u0, v0, u1, v1, ...]
+    /// When present, length must equal vertices.len()
+    pub uvs: Option<Vec<f32>>,
 }
 
-/// Create a ring (annulus) mesh
+impl Mesh {
+    /// Create a mesh without UVs
+    pub fn new(vertices: Vec<f32>, triangles: Vec<u32>) -> Self {
+        Self {
+            vertices,
+            triangles,
+            uvs: None,
+        }
+    }
+
+    /// Create a mesh with UVs
+    pub fn with_uvs(vertices: Vec<f32>, triangles: Vec<u32>, uvs: Vec<f32>) -> Self {
+        assert_eq!(
+            vertices.len(),
+            uvs.len(),
+            "UV count must match vertex count"
+        );
+        Self {
+            vertices,
+            triangles,
+            uvs: Some(uvs),
+        }
+    }
+
+    /// Number of vertices
+    #[inline]
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len() / 2
+    }
+
+    /// Get UV coordinates, generating defaults if not present
+    pub fn uvs_or_default(&self) -> Vec<f32> {
+        self.uvs.clone().unwrap_or_else(|| vec![0.0; self.vertices.len()])
+    }
+}
+
+/// Create a ring (annulus) mesh with UV coordinates
+///
+/// UV mapping preserves texture aspect ratio - the ring samples from the texture
+/// based on its actual position, so the texture's donut proportions are maintained.
+/// The outer_radius maps to UV 0-1, so the ring "cuts out" its portion of the texture.
 pub fn create_ring_mesh(
     outer_radius: f32,
     inner_radius: f32,
@@ -16,15 +64,27 @@ pub fn create_ring_mesh(
     radial_divisions: u32,
 ) -> Mesh {
     let mut vertices = Vec::new();
+    let mut uvs = Vec::new();
     let mut triangles = Vec::new();
 
     // Create vertex grid (no duplicate vertices at seam)
     for r in 0..=radial_divisions {
-        let radius = inner_radius + (outer_radius - inner_radius) * (r as f32 / radial_divisions as f32);
+        let t = r as f32 / radial_divisions as f32;
+        let radius = inner_radius + (outer_radius - inner_radius) * t;
+
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * PI * 2.0;
-            vertices.push(angle.cos() * radius);
-            vertices.push(angle.sin() * radius);
+            let x = angle.cos() * radius;
+            let y = angle.sin() * radius;
+            vertices.push(x);
+            vertices.push(y);
+
+            // UV: direct position mapping, outer_radius maps to texture edge
+            // This preserves the texture's aspect ratio
+            let u = 0.5 + (x / outer_radius) * 0.5;
+            let v = 0.5 + (y / outer_radius) * 0.5;
+            uvs.push(u);
+            uvs.push(v);
         }
     }
 
@@ -47,7 +107,7 @@ pub fn create_ring_mesh(
         }
     }
 
-    Mesh { vertices, triangles }
+    Mesh::with_uvs(vertices, triangles, uvs)
 }
 
 /// Create wireframe indices from ring mesh
@@ -93,18 +153,27 @@ pub fn offset_vertices(vertices: &mut [f32], dx: f32, dy: f32) {
     }
 }
 
-/// Create a simple square mesh
+/// Create a simple square mesh with UV coordinates
+///
+/// UV mapping: direct 0-1 mapping across the square
 pub fn create_square_mesh(size: f32, divisions: u32) -> Mesh {
     let mut vertices = Vec::new();
+    let mut uvs = Vec::new();
     let mut triangles = Vec::new();
     let half_size = size / 2.0;
 
     for y in 0..=divisions {
         for x in 0..=divisions {
-            let px = -half_size + (x as f32 / divisions as f32) * size;
-            let py = -half_size + (y as f32 / divisions as f32) * size;
+            let tx = x as f32 / divisions as f32;
+            let ty = y as f32 / divisions as f32;
+
+            let px = -half_size + tx * size;
+            let py = -half_size + ty * size;
             vertices.push(px);
             vertices.push(py);
+
+            uvs.push(tx);
+            uvs.push(ty);
         }
     }
 
@@ -126,10 +195,12 @@ pub fn create_square_mesh(size: f32, divisions: u32) -> Mesh {
         }
     }
 
-    Mesh { vertices, triangles }
+    Mesh::with_uvs(vertices, triangles, uvs)
 }
 
 /// Create an ellipse mesh with a small hole in the center (like ring topology)
+///
+/// UV mapping: same as ring mesh (u = angle, v = radial position)
 pub fn create_ellipse_mesh(
     width: f32,
     height: f32,
@@ -137,6 +208,7 @@ pub fn create_ellipse_mesh(
     rings: u32,
 ) -> Mesh {
     let mut vertices = Vec::new();
+    let mut uvs = Vec::new();
     let mut triangles = Vec::new();
 
     // Create rings from inner (small hole) to outer
@@ -144,7 +216,8 @@ pub fn create_ellipse_mesh(
     let inner_scale = 0.2;
 
     for r in 0..=rings {
-        let t = inner_scale + (1.0 - inner_scale) * (r as f32 / rings as f32);
+        let radial_t = r as f32 / rings as f32;
+        let t = inner_scale + (1.0 - inner_scale) * radial_t;
         let rx = width * 0.5 * t;
         let ry = height * 0.5 * t;
 
@@ -152,6 +225,9 @@ pub fn create_ellipse_mesh(
             let angle = (i as f32 / segments as f32) * PI * 2.0;
             vertices.push(angle.cos() * rx);
             vertices.push(angle.sin() * ry);
+
+            uvs.push(i as f32 / segments as f32);
+            uvs.push(radial_t);
         }
     }
 
@@ -173,10 +249,12 @@ pub fn create_ellipse_mesh(
         }
     }
 
-    Mesh { vertices, triangles }
+    Mesh::with_uvs(vertices, triangles, uvs)
 }
 
 /// Create a star-shaped mesh with a small hole in the center
+///
+/// UV mapping: u = angle, v = radial position
 pub fn create_star_mesh(
     outer_radius: f32,
     inner_radius: f32,
@@ -184,6 +262,7 @@ pub fn create_star_mesh(
     rings: u32,
 ) -> Mesh {
     let mut vertices = Vec::new();
+    let mut uvs = Vec::new();
     let mut triangles = Vec::new();
 
     // Create rings with alternating star points
@@ -193,7 +272,8 @@ pub fn create_star_mesh(
     let inner_scale = 0.25;
 
     for r in 0..=rings {
-        let t = inner_scale + (1.0 - inner_scale) * (r as f32 / rings as f32);
+        let radial_t = r as f32 / rings as f32;
+        let t = inner_scale + (1.0 - inner_scale) * radial_t;
 
         for i in 0..total_points {
             let angle = (i as f32 / total_points as f32) * PI * 2.0;
@@ -205,6 +285,9 @@ pub fn create_star_mesh(
             };
             vertices.push(angle.cos() * radius);
             vertices.push(angle.sin() * radius);
+
+            uvs.push(i as f32 / total_points as f32);
+            uvs.push(radial_t);
         }
     }
 
@@ -226,10 +309,12 @@ pub fn create_star_mesh(
         }
     }
 
-    Mesh { vertices, triangles }
+    Mesh::with_uvs(vertices, triangles, uvs)
 }
 
 /// Create a blob mesh with randomized vertex positions and a small hole in the center
+///
+/// UV mapping: u = angle, v = radial position
 pub fn create_blob_mesh(
     base_radius: f32,
     variation: f32,
@@ -238,6 +323,7 @@ pub fn create_blob_mesh(
     seed: u32,
 ) -> Mesh {
     let mut vertices = Vec::new();
+    let mut uvs = Vec::new();
     let mut triangles = Vec::new();
 
     // Simple deterministic "random" based on seed
@@ -251,7 +337,8 @@ pub fn create_blob_mesh(
 
     // Create rings with randomized radii (including inner ring)
     for r in 0..=rings {
-        let base_t = inner_scale + (1.0 - inner_scale) * (r as f32 / rings as f32);
+        let radial_t = r as f32 / rings as f32;
+        let base_t = inner_scale + (1.0 - inner_scale) * radial_t;
 
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * PI * 2.0;
@@ -259,6 +346,9 @@ pub fn create_blob_mesh(
             let radius = base_radius * base_t * random_factor;
             vertices.push(angle.cos() * radius);
             vertices.push(angle.sin() * radius);
+
+            uvs.push(i as f32 / segments as f32);
+            uvs.push(radial_t);
         }
     }
 
@@ -280,7 +370,7 @@ pub fn create_blob_mesh(
         }
     }
 
-    Mesh { vertices, triangles }
+    Mesh::with_uvs(vertices, triangles, uvs)
 }
 
 /// Create wireframe for any radial mesh (ellipse, star, blob) - now with hole topology

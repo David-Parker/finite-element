@@ -1,0 +1,8 @@
+[package]
+name = "fem-engine"
+version.workspace = true
+edition.workspace = true
+description = "Platform-agnostic game engine built on fem-core physics"
+
+[dependencies]
+fem-core = { path = "../fem-core" }
