@@ -5,7 +5,7 @@
   <title>FEM Ring Game</title>
   <link rel="stylesheet" href="/style-a4e8c160cd9f0903.css" integrity="sha384-1sviplO8CqG1T7QsF/dwrypjaRmApXRJ8c5zdnn9TjQojOD1iiqCkLoOpekk0EgL"/>
   
-<link rel="modulepreload" href="/fem-game-59bb542b3d10d4f0.js" crossorigin="anonymous" integrity="sha384-fUO16sjQZ8Eip3e1b3UyyEqEQkZRbdA0mfiA2hUpUKsWNdIEo/faBwUIM3a6QJDB"><link rel="preload" href="/fem-game-59bb542b3d10d4f0_bg.wasm" crossorigin="anonymous" integrity="sha384-vtx3lE/t0OaexSRLvxpQx5pWhNr3kX33jeJ/pipz0jVTOzzLYKIzXBzzDn+AwOMo" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/fem-game-8f3105dbb46eb166.js" crossorigin="anonymous" integrity="sha384-fUO16sjQZ8Eip3e1b3UyyEqEQkZRbdA0mfiA2hUpUKsWNdIEo/faBwUIM3a6QJDB"><link rel="preload" href="/fem-game-8f3105dbb46eb166_bg.wasm" crossorigin="anonymous" integrity="sha384-G5OvX8kem0ISWHC0AhFvks4Xw0eP0b0FTfKHQgKrmR7PXiP3N4chJUMWcq1yXyN5" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="canvas" width="800" height="600"></canvas>
   <div id="info">
@@ -18,8 +18,8 @@
 
   
 <script type="module">
-import init, * as bindings from '/fem-game-59bb542b3d10d4f0.js';
-const wasm = await init({ module_or_path: '/fem-game-59bb542b3d10d4f0_bg.wasm' });
+import init, * as bindings from '/fem-game-8f3105dbb46eb166.js';
+const wasm = await init({ module_or_path: '/fem-game-8f3105dbb46eb166_bg.wasm' });
 
 
 window.wasmBindings = bindings;

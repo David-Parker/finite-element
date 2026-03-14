@@ -794,6 +794,14 @@ impl PhysicsWorld {
             // Resolve collisions (respecting collision groups)
             self.resolve_collisions_with_groups();
 
+            // Re-solve constraints after collisions to restore shape
+            // This prevents permanent deformation from collision pushes
+            for body in &mut self.bodies {
+                for _ in 0..3 {
+                    body.solve_constraints(substep_dt);
+                }
+            }
+
             // Post-solve all bodies
             for body in &mut self.bodies {
                 body.substep_post(substep_dt);

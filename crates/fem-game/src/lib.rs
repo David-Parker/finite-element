@@ -13,12 +13,18 @@ use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, HtmlImageElemen
 use fem_core::{PhysicsWorld, BodyHandle, BodyConfig, Material};
 use fem_core::mesh::create_ring_mesh;
 
-/// Custom donut material - softer and squishier
-/// Higher compliance = less stiff, more deformation
-const DONUT_MATERIAL: Material = Material {
+/// Player donut material - softer and squishier
+const PLAYER_MATERIAL: Material = Material {
     density: 950.0,           // Lighter = bouncier response
     edge_compliance: 5e-7,    // Softer edges - more wobble
     area_compliance: 5e-7,    // Softer volume - more squish
+};
+
+/// Dropped donut material - stiffer to prevent crushing on smaller rings
+const DROPPED_MATERIAL: Material = Material {
+    density: 950.0,
+    edge_compliance: 1e-8,    // Stiffer edges
+    area_compliance: 1e-8,    // Much stiffer area to prevent collapse
 };
 
 use crate::renderer::{Renderer, BodyRenderData};
@@ -134,7 +140,7 @@ impl Game {
 
         let start_y = GROUND_Y + PLAYER_OUTER_RADIUS + 0.5;
         let player = world.add_body(&player_mesh, BodyConfig::new()
-            .with_material(DONUT_MATERIAL)
+            .with_material(PLAYER_MATERIAL)
             .at_position(0.0, start_y));
 
         let mut renderer = Renderer::new(gl)?;
@@ -323,7 +329,7 @@ impl Game {
         );
 
         let handle = self.world.add_body(&mesh, BodyConfig::new()
-            .with_material(DONUT_MATERIAL)
+            .with_material(DROPPED_MATERIAL)
             .at_position(drop_x, drop_y));
 
         self.dropped_rings.push(handle);

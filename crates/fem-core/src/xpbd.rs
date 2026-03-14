@@ -2058,6 +2058,171 @@ mod tests {
         (min_y, max_y)
     }
 
+    fn get_x_bounds(body: &XPBDSoftBody) -> (f32, f32) {
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        for i in 0..body.num_verts {
+            let x = body.pos[i * 2];
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+        }
+        (min_x, max_x)
+    }
+
+    /// Test small chocolate donuts at extreme velocities
+    /// Reproduces the game's dropped ring crushing issue
+    #[test]
+    fn test_small_donut_extreme_impact() {
+        // Exact game dimensions for dropped rings
+        let mesh = create_ring_mesh(1.01, 0.37, 16, 4);
+        let mesh_diameter = 1.01 * 2.0;
+
+        // Use the softer game material that causes issues
+        let edge_compliance = 5e-7;
+        let area_compliance = 5e-7;
+
+        let mut body = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 950.0, edge_compliance, area_compliance
+        );
+
+        // Extreme velocity - falling from high up
+        let start_height = 20.0;
+        let impact_velocity = -40.0;  // Very fast
+        for i in 0..body.num_verts {
+            body.pos[i * 2 + 1] += start_height;
+            body.prev_pos[i * 2 + 1] += start_height;
+            body.vel[i * 2 + 1] = impact_velocity;
+        }
+
+        println!("=== Small Donut Extreme Impact Test ===");
+        println!("Mesh diameter: {:.3}", mesh_diameter);
+        println!("Material: edge_compliance={:e}, area_compliance={:e}", edge_compliance, area_compliance);
+        println!("Impact velocity: {:.1}", impact_velocity);
+
+        let ground_y = -5.0;
+        let dt = 1.0 / 60.0;
+        let substeps = 4;
+        let substep_dt = dt / substeps as f32;
+
+        // Simulate 10 seconds
+        for frame in 0..600 {
+            for _ in 0..substeps {
+                body.substep_pre_with_friction(substep_dt, -15.0, Some(ground_y), 0.7, 0.0);
+                // Extra constraint solving after ground collision to restore shape
+                for _ in 0..3 {
+                    body.solve_constraints(substep_dt);
+                }
+                body.substep_post(substep_dt);
+            }
+
+            if frame == 5 || frame == 10 || frame == 30 || frame == 60 || frame == 300 || frame == 599 {
+                let (min_y, max_y) = get_y_bounds(&body);
+                let (min_x, max_x) = get_x_bounds(&body);
+                let height = max_y - min_y;
+                let width = max_x - min_x;
+                println!("Frame {:3}: height={:.3} ({:.1}%), width={:.3} ({:.1}%)",
+                    frame, height, height / mesh_diameter * 100.0,
+                    width, width / mesh_diameter * 100.0);
+            }
+        }
+
+        let (min_y, max_y) = get_y_bounds(&body);
+        let (min_x, max_x) = get_x_bounds(&body);
+        let final_height = max_y - min_y;
+        let final_width = max_x - min_x;
+
+        println!("Final: height={:.3} ({:.1}%), width={:.3} ({:.1}%)",
+            final_height, final_height / mesh_diameter * 100.0,
+            final_width, final_width / mesh_diameter * 100.0);
+
+        assert!(
+            final_height / mesh_diameter > 0.7,
+            "Ring height collapsed to {:.1}%", final_height / mesh_diameter * 100.0
+        );
+        assert!(
+            final_width / mesh_diameter > 0.7,
+            "Ring width collapsed to {:.1}%", final_width / mesh_diameter * 100.0
+        );
+    }
+
+    /// Test small donuts colliding with each other at high speed
+    #[test]
+    fn test_small_donuts_collision_crushing() {
+        let mesh = create_ring_mesh(1.01, 0.37, 16, 4);
+        let mesh_diameter = 1.01 * 2.0;
+
+        // Softer material
+        let edge_compliance = 5e-7;
+        let area_compliance = 5e-7;
+
+        // Create multiple rings falling at different times
+        let mut bodies: Vec<XPBDSoftBody> = Vec::new();
+        for i in 0..5 {
+            let mut body = XPBDSoftBody::new(
+                &mesh.vertices, &mesh.triangles, 950.0, edge_compliance, area_compliance
+            );
+            // Stagger heights so they land on each other
+            let height = 5.0 + i as f32 * 3.0;
+            // Slight horizontal offset
+            let x_offset = (i as f32 - 2.0) * 0.3;
+            for j in 0..body.num_verts {
+                body.pos[j * 2] += x_offset;
+                body.pos[j * 2 + 1] += height;
+                body.prev_pos[j * 2] += x_offset;
+                body.prev_pos[j * 2 + 1] += height;
+                body.vel[j * 2 + 1] = -30.0;  // Fast fall
+            }
+            bodies.push(body);
+        }
+
+        println!("=== Small Donuts Collision Crushing Test ===");
+        println!("5 rings falling and colliding");
+
+        let mut collision_system = CollisionSystem::new(0.15);
+        let ground_y = -5.0;
+        let dt = 1.0 / 60.0;
+        let substeps = 4;
+        let substep_dt = dt / substeps as f32;
+
+        // Simulate 10 seconds
+        for frame in 0..600 {
+            for _ in 0..substeps {
+                for body in &mut bodies {
+                    body.substep_pre_with_friction(substep_dt, -15.0, Some(ground_y), 0.7, 0.0);
+                }
+                collision_system.solve_collisions(&mut bodies);
+                // FIX: Re-solve constraints after collisions to restore shape
+                for body in &mut bodies {
+                    for _ in 0..5 {
+                        body.solve_constraints(substep_dt);
+                    }
+                }
+                for body in &mut bodies {
+                    body.substep_post(substep_dt);
+                }
+            }
+        }
+
+        // Check all rings maintained shape
+        let mut any_crushed = false;
+        for (i, body) in bodies.iter().enumerate() {
+            let (min_y, max_y) = get_y_bounds(body);
+            let (min_x, max_x) = get_x_bounds(body);
+            let height = max_y - min_y;
+            let width = max_x - min_x;
+            let h_ratio = height / mesh_diameter;
+            let w_ratio = width / mesh_diameter;
+
+            println!("Ring {}: h={:.1}%, w={:.1}%", i, h_ratio * 100.0, w_ratio * 100.0);
+            if h_ratio < 0.6 || w_ratio < 0.6 {
+                println!("  ^ CRUSHED!");
+                any_crushed = true;
+            }
+        }
+
+        assert!(!any_crushed, "Some rings got permanently crushed!");
+    }
+
     /// Test multiple soft rings colliding and stacking
     /// This reproduces the game's donut drop scenario
     #[test]
