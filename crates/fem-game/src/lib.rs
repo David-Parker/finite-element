@@ -13,12 +13,12 @@ use web_sys::{console, WebGlRenderingContext, HtmlCanvasElement, HtmlImageElemen
 use fem_core::{PhysicsWorld, BodyHandle, BodyConfig, Material};
 use fem_core::mesh::create_ring_mesh;
 
-/// Custom donut material - jiggly but maintains shape
-/// Slight edge compliance allows wobble, low area compliance maintains volume
+/// Custom donut material - softer and squishier
+/// Higher compliance = less stiff, more deformation
 const DONUT_MATERIAL: Material = Material {
     density: 950.0,           // Lighter = bouncier response
-    edge_compliance: 1e-8,    // Tiny bit of edge flex for jiggle
-    area_compliance: 1e-7,    // Same as rubber - maintains volume/shape
+    edge_compliance: 5e-7,    // Softer edges - more wobble
+    area_compliance: 5e-7,    // Softer volume - more squish
 };
 
 use crate::renderer::{Renderer, BodyRenderData};
