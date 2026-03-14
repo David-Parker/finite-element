@@ -192,6 +192,9 @@ pub struct PhysicsWorld {
     triangles: Vec<Vec<u32>>,
     collision_system: CollisionSystem,
 
+    // Render interpolation: positions from the previous physics frame
+    prev_render_positions: Vec<Vec<f32>>,
+
     // Simulation parameters
     gravity: f32,
     ground_y: Option<f32>,
@@ -213,6 +216,7 @@ impl PhysicsWorld {
             body_data: Vec::new(),
             triangles: Vec::new(),
             collision_system: CollisionSystem::new(0.15),
+            prev_render_positions: Vec::new(),
             gravity: -9.8,
             ground_y: None,
             ground_friction: 0.8,
@@ -340,6 +344,7 @@ impl PhysicsWorld {
         self.bodies.push(body);
         self.body_data.push(body_data);
         self.triangles.push(mesh.triangles.clone());
+        self.prev_render_positions.push(vertices.clone());
 
         handle
     }
@@ -359,6 +364,7 @@ impl PhysicsWorld {
         self.bodies.remove(index);
         self.body_data.remove(index);
         self.triangles.remove(index);
+        self.prev_render_positions.remove(index);
         self.index_to_handle.remove(index);
 
         // Invalidate the handle
@@ -521,6 +527,41 @@ impl PhysicsWorld {
         }
     }
 
+    /// Apply angular velocity (rotation) to the body
+    /// Positive = counter-clockwise, negative = clockwise
+    pub fn apply_angular_velocity(&mut self, handle: BodyHandle, omega: f32) {
+        let Some(body) = self.get_body_mut(handle) else { return };
+
+        // Get center of mass
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        for i in 0..body.num_verts {
+            cx += body.pos[i * 2];
+            cy += body.pos[i * 2 + 1];
+        }
+        cx /= body.num_verts as f32;
+        cy /= body.num_verts as f32;
+
+        // Apply tangential velocity to each vertex
+        // v_tangent = omega * r, direction perpendicular to radius
+        for i in 0..body.num_verts {
+            if body.inv_mass[i] > 0.0 {
+                let rx = body.pos[i * 2] - cx;
+                let ry = body.pos[i * 2 + 1] - cy;
+                // Perpendicular direction: (-ry, rx) for CCW
+                body.vel[i * 2] += -ry * omega;
+                body.vel[i * 2 + 1] += rx * omega;
+            }
+        }
+    }
+
+    /// Apply torque (angular acceleration) to the body
+    pub fn apply_torque(&mut self, handle: BodyHandle, torque: f32, dt: f32) {
+        // For a ring, approximate moment of inertia and convert to angular velocity
+        // This is simplified - just apply angular velocity scaled by dt
+        self.apply_angular_velocity(handle, torque * dt);
+    }
+
     // === Position/Transform ===
 
     /// Get the center of mass position
@@ -553,6 +594,16 @@ impl PhysicsWorld {
     /// Compress the body vertically (ratio 0.0-1.0, where 1.0 = no compression)
     /// Useful for squash-and-stretch effects
     pub fn set_vertical_compression(&mut self, handle: BodyHandle, ratio: f32) {
+        // Use squash with no horizontal expansion for backward compatibility
+        self.set_squash(handle, ratio, 1.0);
+    }
+
+    /// Apply squash-and-stretch deformation
+    /// - vertical_ratio: vertical scale (0.5 = squash to 50% height)
+    /// - horizontal_ratio: horizontal scale (1.5 = expand to 150% width)
+    ///
+    /// For volume-preserving squash, use horizontal_ratio = 1.0 / sqrt(vertical_ratio)
+    pub fn set_squash(&mut self, handle: BodyHandle, vertical_ratio: f32, horizontal_ratio: f32) {
         let Some(index) = self.handle_to_index.get(handle.0).copied().flatten() else {
             return;
         };
@@ -572,10 +623,89 @@ impl PhysicsWorld {
             let dy = (y1 - y0).abs();
             let dx = (x1 - x0).abs();
 
-            // Compress edges that are more vertical than horizontal
-            if dy > dx * 0.5 {
-                constraint.rest_length = data.original_edge_lengths[i] * ratio;
+            // Determine edge orientation and apply appropriate scaling
+            let original_len = data.original_edge_lengths[i];
+
+            if dy > dx * 2.0 {
+                // Mostly vertical edge - compress
+                constraint.rest_length = original_len * vertical_ratio;
+            } else if dx > dy * 2.0 {
+                // Mostly horizontal edge - expand
+                constraint.rest_length = original_len * horizontal_ratio;
+            } else {
+                // Diagonal edge - blend based on angle
+                let angle_factor = dy / (dx + dy + 0.001);
+                let ratio = vertical_ratio * angle_factor + horizontal_ratio * (1.0 - angle_factor);
+                constraint.rest_length = original_len * ratio;
             }
+        }
+    }
+
+    /// Apply a "charging" squash effect - compresses body against ground
+    /// amount: 0.0 = no squash, 1.0 = maximum squash
+    ///
+    /// This creates a natural-looking compression by:
+    /// 1. Pushing vertices toward the ground
+    /// 2. Applying volume-preserving squash to rest lengths
+    pub fn apply_ground_squash(&mut self, handle: BodyHandle, amount: f32, ground_y: f32) {
+        let amount = amount.clamp(0.0, 1.0);
+        if amount < 0.001 {
+            self.reset_rest_lengths(handle);
+            return;
+        }
+
+        let Some(index) = self.handle_to_index.get(handle.0).copied().flatten() else {
+            return;
+        };
+
+        // Calculate body bounds
+        let body = &self.bodies[index];
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut center_x = 0.0;
+
+        for i in 0..body.num_verts {
+            let y = body.pos[i * 2 + 1];
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            center_x += body.pos[i * 2];
+        }
+        center_x /= body.num_verts as f32;
+        let height = max_y - min_y;
+
+        // Target compression: squash to (1 - amount * 0.5) of original height
+        let vertical_ratio = 1.0 - amount * 0.5;
+        // Volume preserving: expand horizontally
+        let horizontal_ratio = 1.0 / vertical_ratio.sqrt();
+
+        // Apply squash to rest lengths
+        self.set_squash(handle, vertical_ratio, horizontal_ratio);
+
+        // Also physically push vertices toward squashed shape
+        let body = &mut self.bodies[index];
+        let target_height = height * vertical_ratio;
+        let target_bottom = ground_y;
+
+        for i in 0..body.num_verts {
+            if body.inv_mass[i] == 0.0 {
+                continue;
+            }
+
+            let x = body.pos[i * 2];
+            let y = body.pos[i * 2 + 1];
+
+            // Map current Y position to target squashed position
+            let t = (y - min_y) / (height + 0.001); // 0 at bottom, 1 at top
+            let target_y = target_bottom + t * target_height;
+
+            // Blend toward target based on amount
+            let blend = amount * 0.3; // Don't fully snap, let physics do the rest
+            body.pos[i * 2 + 1] = y + (target_y - y) * blend;
+
+            // Push outward horizontally for volume preservation
+            let dx = x - center_x;
+            let target_x = center_x + dx * horizontal_ratio;
+            body.pos[i * 2] = x + (target_x - x) * blend;
         }
     }
 
@@ -627,6 +757,16 @@ impl PhysicsWorld {
     }
 
     // === Simulation ===
+
+    /// Snapshot current positions for render interpolation.
+    /// Call this before stepping physics to enable smooth rendering.
+    pub fn snapshot_for_render(&mut self) {
+        for (i, body) in self.bodies.iter().enumerate() {
+            if i < self.prev_render_positions.len() {
+                self.prev_render_positions[i].copy_from_slice(&body.pos);
+            }
+        }
+    }
 
     /// Step the simulation forward by dt seconds
     pub fn step(&mut self, dt: f32) {
@@ -690,6 +830,52 @@ impl PhysicsWorld {
         let body = self.bodies.get(*index)?;
         let tris = self.triangles.get(*index)?;
         Some((body.pos.as_slice(), tris.as_slice()))
+    }
+
+    /// Get interpolated render data for smoother rendering.
+    /// `alpha` is the interpolation factor (0.0 = previous frame, 1.0 = current frame).
+    /// Returns owned Vec since we're computing interpolated positions.
+    pub fn get_body_render_data_interpolated(&self, handle: BodyHandle, alpha: f32) -> Option<(Vec<f32>, &[u32])> {
+        let index = self.handle_to_index.get(handle.0)?.as_ref()?;
+        let body = self.bodies.get(*index)?;
+        let prev = self.prev_render_positions.get(*index)?;
+        let tris = self.triangles.get(*index)?;
+
+        // Lerp between previous and current positions
+        let alpha = alpha.clamp(0.0, 1.0);
+        let one_minus_alpha = 1.0 - alpha;
+        let interpolated: Vec<f32> = body.pos.iter()
+            .zip(prev.iter())
+            .map(|(&curr, &prev)| prev * one_minus_alpha + curr * alpha)
+            .collect();
+
+        Some((interpolated, tris.as_slice()))
+    }
+
+    /// Get interpolated center position for a body.
+    /// Useful for camera tracking without jitter.
+    pub fn get_position_interpolated(&self, handle: BodyHandle, alpha: f32) -> Option<(f32, f32)> {
+        let index = self.handle_to_index.get(handle.0)?.as_ref()?;
+        let body = self.bodies.get(*index)?;
+        let prev = self.prev_render_positions.get(*index)?;
+
+        let alpha = alpha.clamp(0.0, 1.0);
+        let one_minus_alpha = 1.0 - alpha;
+
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let n = body.num_verts;
+
+        for i in 0..n {
+            let curr_x = body.pos[i * 2];
+            let curr_y = body.pos[i * 2 + 1];
+            let prev_x = prev[i * 2];
+            let prev_y = prev[i * 2 + 1];
+            cx += prev_x * one_minus_alpha + curr_x * alpha;
+            cy += prev_y * one_minus_alpha + curr_y * alpha;
+        }
+
+        Some((cx / n as f32, cy / n as f32))
     }
 }
 
