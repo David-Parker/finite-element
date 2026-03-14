@@ -7,55 +7,140 @@
 //! - "XPBD: Position-Based Simulation of Compliant Constrained Dynamics" (Macklin et al. 2016)
 //! - Ten Minute Physics XPBD tutorial
 
-use std::collections::HashMap;
 
 #[cfg(feature = "simd")]
 use crate::compute::simd::SimdBackend;
 #[cfg(feature = "simd")]
 use crate::compute::ComputeBackend;
 
-/// Spatial hash grid for O(1) neighbor queries in collision detection
+/// Flat-grid spatial hash for O(1) neighbor queries in collision detection.
+/// Uses a dense grid instead of HashMap for cache-friendly lookups.
 pub struct SpatialHash {
     cell_size: f32,
-    cells: HashMap<(i32, i32), Vec<(usize, usize)>>,  // (body_idx, vert_idx)
+    inv_cell_size: f32,
+    // Grid bounds (in cell coordinates)
+    min_cx: i32,
+    min_cy: i32,
+    cols: usize,
+    rows: usize,
+    // Flat grid: each cell holds a range (start, end) into `entries`
+    cell_ranges: Vec<(u32, u32)>,
+    entries: Vec<(usize, usize)>,  // (body_idx, edge_idx)
+    // Temporary buffer used during build
+    temp_entries: Vec<(i32, i32, usize, usize)>, // (cx, cy, body_idx, edge_idx)
 }
 
 impl SpatialHash {
     pub fn new(cell_size: f32) -> Self {
         SpatialHash {
             cell_size,
-            cells: HashMap::new(),
+            inv_cell_size: 1.0 / cell_size,
+            min_cx: 0,
+            min_cy: 0,
+            cols: 0,
+            rows: 0,
+            cell_ranges: Vec::new(),
+            entries: Vec::with_capacity(512),
+            temp_entries: Vec::with_capacity(512),
         }
     }
 
     #[inline]
     fn hash(&self, x: f32, y: f32) -> (i32, i32) {
-        let cx = (x / self.cell_size).floor() as i32;
-        let cy = (y / self.cell_size).floor() as i32;
+        let cx = (x * self.inv_cell_size).floor() as i32;
+        let cy = (y * self.inv_cell_size).floor() as i32;
         (cx, cy)
     }
 
+    #[inline]
+    fn cell_index(&self, cx: i32, cy: i32) -> Option<usize> {
+        let lx = cx - self.min_cx;
+        let ly = cy - self.min_cy;
+        if lx >= 0 && ly >= 0 && (lx as usize) < self.cols && (ly as usize) < self.rows {
+            Some(ly as usize * self.cols + lx as usize)
+        } else {
+            None
+        }
+    }
+
     pub fn clear(&mut self) {
-        self.cells.clear();
+        self.temp_entries.clear();
+        self.entries.clear();
     }
 
-    pub fn insert(&mut self, body_idx: usize, vert_idx: usize, x: f32, y: f32) {
-        let key = self.hash(x, y);
-        self.cells.entry(key).or_insert_with(Vec::new).push((body_idx, vert_idx));
-    }
-
-    /// Get all entries in cell and neighboring cells
-    pub fn query_neighbors(&self, x: f32, y: f32) -> impl Iterator<Item = &(usize, usize)> {
+    /// Stage an entry for insertion (call `build()` after all inserts)
+    pub fn insert(&mut self, body_idx: usize, edge_idx: usize, x: f32, y: f32) {
         let (cx, cy) = self.hash(x, y);
-        // Check 3x3 neighborhood
-        (-1..=1).flat_map(move |dx| {
-            (-1..=1).flat_map(move |dy| {
-                self.cells.get(&(cx + dx, cy + dy))
-                    .map(|v| v.iter())
-                    .into_iter()
-                    .flatten()
-            })
-        })
+        self.temp_entries.push((cx, cy, body_idx, edge_idx));
+    }
+
+    /// Build the flat grid from staged entries. Must be called after all `insert`s.
+    pub fn build(&mut self) {
+        if self.temp_entries.is_empty() {
+            self.cols = 0;
+            self.rows = 0;
+            return;
+        }
+
+        // Find grid bounds
+        let mut min_cx = i32::MAX;
+        let mut min_cy = i32::MAX;
+        let mut max_cx = i32::MIN;
+        let mut max_cy = i32::MIN;
+        for &(cx, cy, _, _) in &self.temp_entries {
+            min_cx = min_cx.min(cx);
+            min_cy = min_cy.min(cy);
+            max_cx = max_cx.max(cx);
+            max_cy = max_cy.max(cy);
+        }
+        // Expand by 1 for neighbor queries at the boundary
+        self.min_cx = min_cx;
+        self.min_cy = min_cy;
+        self.cols = (max_cx - min_cx + 1) as usize;
+        self.rows = (max_cy - min_cy + 1) as usize;
+
+        let num_cells = self.cols * self.rows;
+
+        // Count entries per cell
+        self.cell_ranges.clear();
+        self.cell_ranges.resize(num_cells, (0, 0));
+
+        for &(cx, cy, _, _) in &self.temp_entries {
+            let idx = (cy - self.min_cy) as usize * self.cols + (cx - self.min_cx) as usize;
+            self.cell_ranges[idx].1 += 1; // use .1 as count temporarily
+        }
+
+        // Compute prefix sums to get ranges
+        let mut offset = 0u32;
+        for range in self.cell_ranges.iter_mut() {
+            let count = range.1;
+            range.0 = offset;
+            range.1 = offset;
+            offset += count;
+        }
+
+        // Fill entries
+        self.entries.resize(offset as usize, (0, 0));
+        for &(cx, cy, body_idx, edge_idx) in &self.temp_entries {
+            let cell = (cy - self.min_cy) as usize * self.cols + (cx - self.min_cx) as usize;
+            let pos = self.cell_ranges[cell].1 as usize;
+            self.entries[pos] = (body_idx, edge_idx);
+            self.cell_ranges[cell].1 += 1;
+        }
+    }
+
+    /// Fill `result` buffer with all entries in cell and its 3x3 neighborhood
+    #[inline]
+    pub fn query_neighbors_into(&self, x: f32, y: f32, result: &mut Vec<(usize, usize)>) {
+        let (cx, cy) = self.hash(x, y);
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if let Some(idx) = self.cell_index(cx + dx, cy + dy) {
+                    let (start, end) = self.cell_ranges[idx];
+                    result.extend_from_slice(&self.entries[start as usize..end as usize]);
+                }
+            }
+        }
     }
 }
 
@@ -65,8 +150,6 @@ struct CachedEdge {
     body_idx: usize,
     v0: usize,
     v1: usize,
-    mid_x: f32,
-    mid_y: f32,
     dx: f32,      // e1.x - e0.x
     dy: f32,      // e1.y - e0.y
     len_sq: f32,  // dx*dx + dy*dy
@@ -81,6 +164,11 @@ pub struct CollisionSystem {
     aabbs: Vec<(f32, f32, f32, f32)>,
     overlapping_pairs: Vec<(usize, usize)>,
     cached_edges: Vec<CachedEdge>,  // Precomputed edge data per frame
+    body_needs_collision: Vec<bool>, // Reusable buffer to avoid per-call allocation
+    query_buf: Vec<(usize, usize)>, // Reusable buffer for spatial hash query results
+    // Per-body "danger zone" AABB: union of all overlapping partner AABBs.
+    // Vertices outside this zone can't possibly collide with another body.
+    danger_zones: Vec<(f32, f32, f32, f32)>,
 }
 
 impl CollisionSystem {
@@ -94,6 +182,9 @@ impl CollisionSystem {
             aabbs: Vec::with_capacity(32),
             overlapping_pairs: Vec::with_capacity(64),
             cached_edges: Vec::with_capacity(256),
+            body_needs_collision: Vec::with_capacity(32),
+            query_buf: Vec::with_capacity(32),
+            danger_zones: Vec::with_capacity(32),
         }
     }
 
@@ -108,15 +199,6 @@ impl CollisionSystem {
     /// Uses vertex-edge collision with edge spatial hash for efficiency
     /// Runs multiple iterations for better separation
     pub fn solve_collisions(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
-        let mut total = 0;
-        // Multiple iterations help resolve deep penetrations
-        for _ in 0..3 {
-            total += self.solve_collisions_once(bodies);
-        }
-        total
-    }
-
-    fn solve_collisions_once(&mut self, bodies: &mut [XPBDSoftBody]) -> u32 {
         let num_bodies = bodies.len();
 
         // Step 1: Compute AABBs for all bodies
@@ -125,7 +207,7 @@ impl CollisionSystem {
             self.aabbs.push(body.get_aabb());
         }
 
-        // Step 2: Find overlapping body pairs (broad phase)
+        // Step 2: Find overlapping body pairs (broad phase) — done once
         self.overlapping_pairs.clear();
         for i in 0..num_bodies {
             for j in (i + 1)..num_bodies {
@@ -139,24 +221,44 @@ impl CollisionSystem {
             return 0;
         }
 
-        // Step 3: Cache edge data and build edge spatial hash
+        // Step 3: Cache edge data and build spatial hash — done once
         self.cached_edges.clear();
         self.edge_hash.clear();
 
-        let mut body_needs_collision = vec![false; num_bodies];
+        self.body_needs_collision.clear();
+        self.body_needs_collision.resize(num_bodies, false);
+        // Per-body danger zone: the region where this body's vertices could collide
+        // (union of all overlapping partner AABBs, expanded by min_dist)
+        self.danger_zones.clear();
+        self.danger_zones.resize(num_bodies, (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY));
+        let margin = self.min_dist;
         for &(i, j) in &self.overlapping_pairs {
-            body_needs_collision[i] = true;
-            body_needs_collision[j] = true;
+            self.body_needs_collision[i] = true;
+            self.body_needs_collision[j] = true;
+            // Body i's danger zone expands to include body j's AABB
+            let aj = self.aabbs[j];
+            let di = &mut self.danger_zones[i];
+            di.0 = di.0.min(aj.0 - margin);
+            di.1 = di.1.min(aj.1 - margin);
+            di.2 = di.2.max(aj.2 + margin);
+            di.3 = di.3.max(aj.3 + margin);
+            // Body j's danger zone expands to include body i's AABB
+            let ai = self.aabbs[i];
+            let dj = &mut self.danger_zones[j];
+            dj.0 = dj.0.min(ai.0 - margin);
+            dj.1 = dj.1.min(ai.1 - margin);
+            dj.2 = dj.2.max(ai.2 + margin);
+            dj.3 = dj.3.max(ai.3 + margin);
         }
 
         for (body_idx, body) in bodies.iter().enumerate() {
-            if !body_needs_collision[body_idx] { continue; }
+            if !self.body_needs_collision[body_idx] { continue; }
+            let dz = self.danger_zones[body_idx];
 
             for edge in &body.edge_constraints {
                 let w0 = body.inv_mass[edge.v0];
                 let w1 = body.inv_mass[edge.v1];
 
-                // Skip edges where both endpoints are fixed
                 if w0 == 0.0 && w1 == 0.0 { continue; }
 
                 let e0x = body.pos[edge.v0 * 2];
@@ -164,22 +266,25 @@ impl CollisionSystem {
                 let e1x = body.pos[edge.v1 * 2];
                 let e1y = body.pos[edge.v1 * 2 + 1];
 
+                // Skip edges entirely outside the danger zone
+                let edge_min_x = e0x.min(e1x);
+                let edge_max_x = e0x.max(e1x);
+                let edge_min_y = e0y.min(e1y);
+                let edge_max_y = e0y.max(e1y);
+                if edge_max_x < dz.0 || edge_min_x > dz.2 ||
+                   edge_max_y < dz.1 || edge_min_y > dz.3 { continue; }
+
                 let dx = e1x - e0x;
                 let dy = e1y - e0y;
                 let len_sq = dx * dx + dy * dy;
 
                 if len_sq < 1e-10 { continue; }
 
-                let mid_x = (e0x + e1x) * 0.5;
-                let mid_y = (e0y + e1y) * 0.5;
-
                 let edge_idx = self.cached_edges.len();
                 self.cached_edges.push(CachedEdge {
                     body_idx,
                     v0: edge.v0,
                     v1: edge.v1,
-                    mid_x,
-                    mid_y,
                     dx,
                     dy,
                     len_sq,
@@ -188,19 +293,33 @@ impl CollisionSystem {
                 });
 
                 // Insert edge at BOTH endpoints to ensure it's found from any nearby vertex
-                // This is critical for long edges that span multiple cells
                 self.edge_hash.insert(body_idx, edge_idx, e0x, e0y);
                 self.edge_hash.insert(body_idx, edge_idx, e1x, e1y);
             }
         }
 
-        // Step 4: For each vertex, query nearby edges and check collisions
+        // Build the flat grid from staged entries
+        self.edge_hash.build();
+
+        // Step 4: Narrow phase — repeat up to 3 times for deep penetrations
+        let mut total = 0;
+        for _ in 0..3 {
+            let found = self.solve_narrow_phase(bodies, num_bodies);
+            total += found;
+            if found == 0 { break; }
+        }
+        total
+    }
+
+    /// Narrow-phase collision resolution using the pre-built spatial hash.
+    fn solve_narrow_phase(&mut self, bodies: &mut [XPBDSoftBody], num_bodies: usize) -> u32 {
         let mut total_collisions = 0u32;
         let min_dist = self.min_dist;
         let min_dist_sq = min_dist * min_dist;
 
         for body_a_idx in 0..num_bodies {
-            if !body_needs_collision[body_a_idx] { continue; }
+            if !self.body_needs_collision[body_a_idx] { continue; }
+            let dz = self.danger_zones[body_a_idx];
 
             for vert_idx in 0..bodies[body_a_idx].num_verts {
                 let w_vert = bodies[body_a_idx].inv_mass[vert_idx];
@@ -209,20 +328,22 @@ impl CollisionSystem {
                 let vx = bodies[body_a_idx].pos[vert_idx * 2];
                 let vy = bodies[body_a_idx].pos[vert_idx * 2 + 1];
 
-                // Query nearby edges (returns body_idx, edge_idx pairs)
-                let nearby_edges: Vec<(usize, usize)> = self.edge_hash.query_neighbors(vx, vy)
-                    .filter(|&&(b, _)| b != body_a_idx)  // Skip same body
-                    .cloned()
-                    .collect();
+                // Skip vertices outside the danger zone (can't collide with any partner)
+                if vx < dz.0 || vx > dz.2 || vy < dz.1 || vy > dz.3 { continue; }
 
-                for (body_b_idx, edge_idx) in nearby_edges {
+                // Query nearby edges into reusable buffer
+                self.query_buf.clear();
+                self.edge_hash.query_neighbors_into(vx, vy, &mut self.query_buf);
+
+                for i in 0..self.query_buf.len() {
+                    let (body_b_idx, edge_idx) = self.query_buf[i];
+                    if body_b_idx == body_a_idx { continue; }
+
                     let edge = &self.cached_edges[edge_idx];
 
-                    // Use cached edge data
                     let e0x = bodies[body_b_idx].pos[edge.v0 * 2];
                     let e0y = bodies[body_b_idx].pos[edge.v0 * 2 + 1];
 
-                    // Project vertex onto edge line using cached dx/dy/len_sq
                     let t = ((vx - e0x) * edge.dx + (vy - e0y) * edge.dy) / edge.len_sq;
                     let t = t.clamp(0.0, 1.0);
 
@@ -250,11 +371,9 @@ impl CollisionSystem {
                         let vert_corr = overlap * (w_vert / w_total);
                         let edge_corr = overlap * (w_edge / w_total);
 
-                        // Move vertex
                         bodies[body_a_idx].pos[vert_idx * 2] += nx * vert_corr;
                         bodies[body_a_idx].pos[vert_idx * 2 + 1] += ny * vert_corr;
 
-                        // Move edge endpoints
                         let e0_factor = (1.0 - t) * edge.w0 / w_edge.max(1e-10);
                         let e1_factor = t * edge.w1 / w_edge.max(1e-10);
 
@@ -624,7 +743,8 @@ impl XPBDSoftBody {
         let edge_alpha = self.edge_compliance / dt_sq;
 
         // Solve edge (distance) constraints
-        for edge in self.edge_constraints.clone() {
+        for i in 0..self.edge_constraints.len() {
+            let edge = self.edge_constraints[i].clone();
             let violation = self.solve_edge_constraint(&edge, edge_alpha);
             max_violation = max_violation.max(violation);
         }
@@ -633,7 +753,8 @@ impl XPBDSoftBody {
         let area_alpha = self.area_compliance / dt_sq;
 
         // Solve area constraints
-        for area in self.area_constraints.clone() {
+        for i in 0..self.area_constraints.len() {
+            let area = self.area_constraints[i].clone();
             let violation = self.solve_area_constraint(&area, area_alpha);
             max_violation = max_violation.max(violation);
         }
@@ -1544,7 +1665,7 @@ mod tests {
             bodies.push(body);
         }
 
-        let mut collision_system = CollisionSystem::new(0.1);
+        let mut collision_system = CollisionSystem::new(0.05);
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
 
