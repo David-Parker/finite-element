@@ -57,7 +57,7 @@ const CAMERA_SMOOTH: f32 = 0.05;  // camera smoothing factor (lower = smoother)
 // Ring drops
 const DROP_INTERVAL: f32 = 3.0;    // seconds between drops
 const DROP_OUTER_RADIUS: f32 = 1.01;
-const DROP_INNER_RADIUS: f32 = 0.37;
+const DROP_INNER_RADIUS: f32 = 0.444;
 const MAX_DROPPED_RINGS: usize = 10;
 
 /// Input state
@@ -270,7 +270,8 @@ impl Game {
                     if let Some((vx, vy)) = self.world.get_velocity(self.player) {
                         let clamped_vx = vx.clamp(-MAX_HORIZONTAL_SPEED, MAX_HORIZONTAL_SPEED);
                         if (clamped_vx - vx).abs() > 0.01 {
-                            self.world.set_velocity(self.player, clamped_vx, vy);
+                            // Use set_linear_velocity to preserve angular velocity (spin)
+                            self.world.set_linear_velocity(self.player, clamped_vx, vy);
                         }
                     }
                 }
@@ -281,7 +282,8 @@ impl Game {
                 if let Some((vx, vy)) = self.world.get_velocity(self.player) {
                     // Apply deceleration opposite to current velocity
                     let brake_factor = 0.85;  // Reduce velocity each frame
-                    self.world.set_velocity(self.player, vx * brake_factor, vy);
+                    // Use set_linear_velocity to preserve angular velocity (spin)
+                    self.world.set_linear_velocity(self.player, vx * brake_factor, vy);
                 }
             }
 

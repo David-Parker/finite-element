@@ -527,6 +527,101 @@ impl PhysicsWorld {
         }
     }
 
+    /// Get angular velocity of the body (average rotation rate)
+    /// Returns radians per second, positive = counter-clockwise
+    pub fn get_angular_velocity(&self, handle: BodyHandle) -> Option<f32> {
+        let body = self.get_body(handle)?;
+
+        // Get center of mass
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        for i in 0..body.num_verts {
+            cx += body.pos[i * 2];
+            cy += body.pos[i * 2 + 1];
+        }
+        cx /= body.num_verts as f32;
+        cy /= body.num_verts as f32;
+
+        // Get average linear velocity
+        let mut avg_vx = 0.0;
+        let mut avg_vy = 0.0;
+        let mut count = 0;
+        for i in 0..body.num_verts {
+            if body.inv_mass[i] > 0.0 {
+                avg_vx += body.vel[i * 2];
+                avg_vy += body.vel[i * 2 + 1];
+                count += 1;
+            }
+        }
+        if count == 0 { return Some(0.0); }
+        avg_vx /= count as f32;
+        avg_vy /= count as f32;
+
+        // Calculate angular velocity from tangential components
+        // omega = (r x v) / r^2 for each vertex, then average
+        let mut omega_sum = 0.0;
+        let mut weight_sum = 0.0;
+        for i in 0..body.num_verts {
+            if body.inv_mass[i] == 0.0 { continue; }
+
+            let rx = body.pos[i * 2] - cx;
+            let ry = body.pos[i * 2 + 1] - cy;
+            let r_sq = rx * rx + ry * ry;
+
+            if r_sq < 1e-10 { continue; }
+
+            // Velocity relative to center motion
+            let rel_vx = body.vel[i * 2] - avg_vx;
+            let rel_vy = body.vel[i * 2 + 1] - avg_vy;
+
+            // Cross product gives tangential velocity * r
+            // omega = (rx * vy - ry * vx) / r^2
+            let omega_i = (rx * rel_vy - ry * rel_vx) / r_sq;
+            omega_sum += omega_i;
+            weight_sum += 1.0;
+        }
+
+        if weight_sum > 0.0 {
+            Some(omega_sum / weight_sum)
+        } else {
+            Some(0.0)
+        }
+    }
+
+    /// Set linear velocity while preserving angular velocity
+    /// This adjusts all vertex velocities such that the average velocity is (vx, vy)
+    /// but the rotational component remains unchanged.
+    pub fn set_linear_velocity(&mut self, handle: BodyHandle, vx: f32, vy: f32) {
+        let Some(body) = self.get_body_mut(handle) else { return };
+
+        // Get current average velocity
+        let mut avg_vx = 0.0;
+        let mut avg_vy = 0.0;
+        let mut count = 0;
+        for i in 0..body.num_verts {
+            if body.inv_mass[i] > 0.0 {
+                avg_vx += body.vel[i * 2];
+                avg_vy += body.vel[i * 2 + 1];
+                count += 1;
+            }
+        }
+        if count == 0 { return; }
+        avg_vx /= count as f32;
+        avg_vy /= count as f32;
+
+        // Calculate the delta to apply to all vertices
+        let dvx = vx - avg_vx;
+        let dvy = vy - avg_vy;
+
+        // Apply delta to all vertices (preserves relative velocities = angular velocity)
+        for i in 0..body.num_verts {
+            if body.inv_mass[i] > 0.0 {
+                body.vel[i * 2] += dvx;
+                body.vel[i * 2 + 1] += dvy;
+            }
+        }
+    }
+
     /// Apply angular velocity (rotation) to the body
     /// Positive = counter-clockwise, negative = clockwise
     pub fn apply_angular_velocity(&mut self, handle: BodyHandle, omega: f32) {
