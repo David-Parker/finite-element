@@ -963,7 +963,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.25;
+        let collision_dist = 0.02;
 
         // Run 10 seconds
         for frame in 0..600 {
@@ -1020,7 +1020,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.25;
+        let collision_dist = 0.02;
 
         // Run 10 seconds (600 frames)
         for frame in 0..600 {
@@ -1146,7 +1146,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.25;
+        let collision_dist = 0.02;
 
         // Run 10 seconds (600 frames)
         for frame in 0..600 {
@@ -1356,7 +1356,7 @@ mod tests {
 
         let ground_y = -8.0;
         let dt = 1.0 / 60.0 / 8.0;
-        let collision_dist = 0.25;
+        let collision_dist = 0.02;
 
         // Run 10 seconds
         for frame in 0..600 {
