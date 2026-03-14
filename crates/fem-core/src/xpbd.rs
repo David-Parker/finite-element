@@ -12,6 +12,8 @@
 use crate::compute::simd::SimdBackend;
 #[cfg(feature = "simd")]
 use crate::compute::ComputeBackend;
+#[cfg(feature = "simd")]
+use wide::f32x4;
 
 /// Flat-grid spatial hash for O(1) neighbor queries in collision detection.
 /// Uses a dense grid instead of HashMap for cache-friendly lookups.
@@ -425,60 +427,108 @@ impl CollisionSystem {
     }
 
     /// Resolve collisions for all cached candidates using fresh positions.
+    /// SIMD version: batches distance computation for 4 candidates at a time using f32x4,
+    /// then applies corrections scalar. The "parallel x, parallel y" layout means all
+    /// SIMD ops are vertical (lane-parallel) with no horizontal adds.
+    #[cfg(feature = "simd")]
     fn resolve_candidate_collisions(&self, bodies: &mut [XPBDSoftBody]) -> u32 {
         let mut total_collisions = 0u32;
         let min_dist = self.min_dist;
         let min_dist_sq = min_dist * min_dist;
+        let epsilon_v = f32x4::splat(1e-10);
+        let zero_v = f32x4::splat(0.0);
+        let one_v = f32x4::splat(1.0);
 
-        for i in 0..self.candidates.len() {
-            let c = &self.candidates[i];
-            let ba = c.body_a as usize;
-            let vi = c.vert as usize;
-            let bb = c.body_b as usize;
-            let v0 = c.edge_v0 as usize;
-            let v1 = c.edge_v1 as usize;
-            let edge_w0 = f32::from_bits(c.w0);
-            let edge_w1 = f32::from_bits(c.w1);
+        let n = self.candidates.len();
+        let chunks = n / 4;
 
-            let w_vert = bodies[ba].inv_mass[vi];
+        // Process 4 candidates at a time
+        for chunk in 0..chunks {
+            let base = chunk * 4;
 
-            let vx = bodies[ba].pos[vi * 2];
-            let vy = bodies[ba].pos[vi * 2 + 1];
+            // Gather positions for 4 candidates into parallel x/y lanes
+            let mut vx_arr = [0.0f32; 4];
+            let mut vy_arr = [0.0f32; 4];
+            let mut e0x_arr = [0.0f32; 4];
+            let mut e0y_arr = [0.0f32; 4];
+            let mut e1x_arr = [0.0f32; 4];
+            let mut e1y_arr = [0.0f32; 4];
 
-            // Read fresh edge positions
-            let e0x = bodies[bb].pos[v0 * 2];
-            let e0y = bodies[bb].pos[v0 * 2 + 1];
-            let e1x = bodies[bb].pos[v1 * 2];
-            let e1y = bodies[bb].pos[v1 * 2 + 1];
+            for j in 0..4 {
+                let c = &self.candidates[base + j];
+                let ba = c.body_a as usize;
+                let vi = c.vert as usize;
+                let bb = c.body_b as usize;
+                let ev0 = c.edge_v0 as usize;
+                let ev1 = c.edge_v1 as usize;
 
-            let edx = e1x - e0x;
-            let edy = e1y - e0y;
-            let len_sq = edx * edx + edy * edy;
+                vx_arr[j] = bodies[ba].pos[vi * 2];
+                vy_arr[j] = bodies[ba].pos[vi * 2 + 1];
+                e0x_arr[j] = bodies[bb].pos[ev0 * 2];
+                e0y_arr[j] = bodies[bb].pos[ev0 * 2 + 1];
+                e1x_arr[j] = bodies[bb].pos[ev1 * 2];
+                e1y_arr[j] = bodies[bb].pos[ev1 * 2 + 1];
+            }
 
-            if len_sq < 1e-10 { continue; }
+            // SIMD distance computation (all vertical ops, no horizontal adds)
+            let vx_v = f32x4::new(vx_arr);
+            let vy_v = f32x4::new(vy_arr);
+            let e0x_v = f32x4::new(e0x_arr);
+            let e0y_v = f32x4::new(e0y_arr);
+            let e1x_v = f32x4::new(e1x_arr);
+            let e1y_v = f32x4::new(e1y_arr);
 
-            let t = ((vx - e0x) * edx + (vy - e0y) * edy) / len_sq;
-            let t = t.clamp(0.0, 1.0);
+            let edx_v = e1x_v - e0x_v;
+            let edy_v = e1y_v - e0y_v;
+            let len_sq_v = edx_v * edx_v + edy_v * edy_v;
 
-            let closest_x = e0x + t * edx;
-            let closest_y = e0y + t * edy;
+            // Compute t parameter (projection onto edge)
+            let rel_x = vx_v - e0x_v;
+            let rel_y = vy_v - e0y_v;
+            let dot_v = rel_x * edx_v + rel_y * edy_v;
+            // Safe divide: if len_sq is tiny, t will be clamped to 0 anyway
+            let t_v = (dot_v / len_sq_v.max(epsilon_v)).max(zero_v).min(one_v);
 
-            let dx = vx - closest_x;
-            let dy = vy - closest_y;
-            let dist_sq = dx * dx + dy * dy;
+            // Closest point on edge
+            let cx_v = e0x_v + t_v * edx_v;
+            let cy_v = e0y_v + t_v * edy_v;
 
-            if dist_sq < min_dist_sq && dist_sq > 1e-10 {
+            // Distance vector and squared distance
+            let dx_v = vx_v - cx_v;
+            let dy_v = vy_v - cy_v;
+            let dist_sq_v = dx_v * dx_v + dy_v * dy_v;
+
+            // Extract results for scalar collision resolution
+            let dist_sqs = dist_sq_v.to_array();
+            let ts = t_v.to_array();
+            let dxs = dx_v.to_array();
+            let dys = dy_v.to_array();
+            let len_sqs = len_sq_v.to_array();
+
+            for j in 0..4 {
+                if len_sqs[j] < 1e-10 { continue; }
+                if dist_sqs[j] >= min_dist_sq || dist_sqs[j] <= 1e-10 { continue; }
+
                 total_collisions += 1;
 
-                let dist = dist_sq.sqrt();
-                let overlap = min_dist - dist;
+                let c = &self.candidates[base + j];
+                let ba = c.body_a as usize;
+                let vi = c.vert as usize;
+                let bb = c.body_b as usize;
+                let v0 = c.edge_v0 as usize;
+                let v1 = c.edge_v1 as usize;
+                let edge_w0 = f32::from_bits(c.w0);
+                let edge_w1 = f32::from_bits(c.w1);
+                let w_vert = bodies[ba].inv_mass[vi];
+                let t = ts[j];
 
-                let nx = dx / dist;
-                let ny = dy / dist;
+                let dist = dist_sqs[j].sqrt();
+                let overlap = min_dist - dist;
+                let nx = dxs[j] / dist;
+                let ny = dys[j] / dist;
 
                 let w_edge = (1.0 - t) * edge_w0 + t * edge_w1;
                 let w_total = w_vert + w_edge;
-
                 if w_total < 1e-10 { continue; }
 
                 let vert_corr = overlap * (w_vert / w_total);
@@ -497,7 +547,96 @@ impl CollisionSystem {
             }
         }
 
+        // Scalar remainder (0-3 candidates)
+        for i in (chunks * 4)..n {
+            total_collisions += self.resolve_single_candidate(bodies, i, min_dist, min_dist_sq);
+        }
+
         total_collisions
+    }
+
+    /// Resolve collisions for all cached candidates using fresh positions (scalar fallback).
+    #[cfg(not(feature = "simd"))]
+    fn resolve_candidate_collisions(&self, bodies: &mut [XPBDSoftBody]) -> u32 {
+        let mut total_collisions = 0u32;
+        let min_dist = self.min_dist;
+        let min_dist_sq = min_dist * min_dist;
+
+        for i in 0..self.candidates.len() {
+            total_collisions += self.resolve_single_candidate(bodies, i, min_dist, min_dist_sq);
+        }
+
+        total_collisions
+    }
+
+    /// Resolve a single candidate collision. Used by both SIMD remainder and scalar path.
+    #[inline]
+    fn resolve_single_candidate(&self, bodies: &mut [XPBDSoftBody], i: usize, min_dist: f32, min_dist_sq: f32) -> u32 {
+        let c = &self.candidates[i];
+        let ba = c.body_a as usize;
+        let vi = c.vert as usize;
+        let bb = c.body_b as usize;
+        let v0 = c.edge_v0 as usize;
+        let v1 = c.edge_v1 as usize;
+        let edge_w0 = f32::from_bits(c.w0);
+        let edge_w1 = f32::from_bits(c.w1);
+
+        let w_vert = bodies[ba].inv_mass[vi];
+
+        let vx = bodies[ba].pos[vi * 2];
+        let vy = bodies[ba].pos[vi * 2 + 1];
+
+        let e0x = bodies[bb].pos[v0 * 2];
+        let e0y = bodies[bb].pos[v0 * 2 + 1];
+        let e1x = bodies[bb].pos[v1 * 2];
+        let e1y = bodies[bb].pos[v1 * 2 + 1];
+
+        let edx = e1x - e0x;
+        let edy = e1y - e0y;
+        let len_sq = edx * edx + edy * edy;
+
+        if len_sq < 1e-10 { return 0; }
+
+        let t = ((vx - e0x) * edx + (vy - e0y) * edy) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+
+        let closest_x = e0x + t * edx;
+        let closest_y = e0y + t * edy;
+
+        let dx = vx - closest_x;
+        let dy = vy - closest_y;
+        let dist_sq = dx * dx + dy * dy;
+
+        if dist_sq < min_dist_sq && dist_sq > 1e-10 {
+            let dist = dist_sq.sqrt();
+            let overlap = min_dist - dist;
+
+            let nx = dx / dist;
+            let ny = dy / dist;
+
+            let w_edge = (1.0 - t) * edge_w0 + t * edge_w1;
+            let w_total = w_vert + w_edge;
+
+            if w_total < 1e-10 { return 0; }
+
+            let vert_corr = overlap * (w_vert / w_total);
+            let edge_corr = overlap * (w_edge / w_total);
+
+            bodies[ba].pos[vi * 2] += nx * vert_corr;
+            bodies[ba].pos[vi * 2 + 1] += ny * vert_corr;
+
+            let e0_factor = (1.0 - t) * edge_w0 / w_edge.max(1e-10);
+            let e1_factor = t * edge_w1 / w_edge.max(1e-10);
+
+            bodies[bb].pos[v0 * 2] -= nx * edge_corr * e0_factor;
+            bodies[bb].pos[v0 * 2 + 1] -= ny * edge_corr * e0_factor;
+            bodies[bb].pos[v1 * 2] -= nx * edge_corr * e1_factor;
+            bodies[bb].pos[v1 * 2 + 1] -= ny * edge_corr * e1_factor;
+
+            return 1;
+        }
+
+        0
     }
 }
 
