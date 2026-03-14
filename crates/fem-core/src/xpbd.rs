@@ -943,11 +943,12 @@ mod tests {
     fn test_xpbd_two_body_collision() {
         let mesh = create_ring_mesh(1.5, 1.0, 16, 4);
 
+        // Use zero edge compliance (rigid edges) like actual simulation
         let mut body1 = XPBDSoftBody::new(
-            &mesh.vertices, &mesh.triangles, 1100.0, 1e-4, 1e-3
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
         );
         let mut body2 = XPBDSoftBody::new(
-            &mesh.vertices, &mesh.triangles, 1100.0, 1e-4, 1e-3
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
         );
 
         // Position body1 above body2
@@ -967,9 +968,12 @@ mod tests {
         // Run 10 seconds
         for frame in 0..600 {
             for _ in 0..8 {
-                body1.substep(dt, -9.8, Some(ground_y));
-                body2.substep(dt, -9.8, Some(ground_y));
+                // Correct order: pre-solve → collisions → post-solve
+                body1.substep_pre(dt, -9.8, Some(ground_y));
+                body2.substep_pre(dt, -9.8, Some(ground_y));
                 body1.collide_with_body(&mut body2, collision_dist);
+                body1.substep_post(dt);
+                body2.substep_post(dt);
                 body1.apply_damping(0.01);
                 body2.apply_damping(0.01);
             }
@@ -1001,8 +1005,9 @@ mod tests {
         ];
 
         for (x_off, y_off) in offsets {
+            // Use zero edge compliance (rigid edges) like actual simulation
             let mut body = XPBDSoftBody::new(
-                &mesh.vertices, &mesh.triangles, 1100.0, 1e-4, 1e-3
+                &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
             );
             for i in 0..body.num_verts {
                 body.pos[i * 2] += x_off;
@@ -1020,10 +1025,9 @@ mod tests {
         // Run 10 seconds (600 frames)
         for frame in 0..600 {
             for _ in 0..8 {
-                // Physics step
+                // Correct order: pre-solve → collisions → post-solve
                 for body in &mut bodies {
-                    body.substep(dt, -9.8, Some(ground_y));
-                    body.apply_damping(0.01);  // Match material_range test
+                    body.substep_pre(dt, -9.8, Some(ground_y));
                 }
 
                 // Inter-body collisions
@@ -1032,6 +1036,11 @@ mod tests {
                         let (left, right) = bodies.split_at_mut(j);
                         left[i].collide_with_body(&mut right[0], collision_dist);
                     }
+                }
+
+                for body in &mut bodies {
+                    body.substep_post(dt);
+                    body.apply_damping(0.01);
                 }
             }
 
@@ -1207,5 +1216,179 @@ mod tests {
 
         let final_aspect = body.get_aspect_ratio();
         println!("Shape preservation test passed. Initial: {:.2}, Final: {:.2}", initial_aspect, final_aspect);
+    }
+
+    /// Test ellipse mesh simulation stability
+    #[test]
+    fn test_xpbd_ellipse_mesh() {
+        use crate::mesh::create_ellipse_mesh;
+
+        let mesh = create_ellipse_mesh(2.5, 1.8, 16, 4);
+        let mut body = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+
+        // Offset up
+        for i in 0..body.num_verts {
+            body.pos[i * 2 + 1] += 8.0;
+            body.prev_pos[i * 2 + 1] += 8.0;
+        }
+
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+
+        // Run 5 seconds
+        for frame in 0..300 {
+            for _ in 0..8 {
+                body.substep(dt, -9.8, Some(ground_y));
+                body.apply_damping(0.01);
+            }
+
+            let ke = body.get_kinetic_energy();
+            assert!(
+                ke.is_finite() && ke < 1e5,
+                "Frame {}: ellipse KE exploded: {}", frame, ke
+            );
+        }
+
+        println!("XPBD ellipse mesh test passed");
+    }
+
+    /// Test star mesh simulation stability
+    #[test]
+    fn test_xpbd_star_mesh() {
+        use crate::mesh::create_star_mesh;
+
+        let mesh = create_star_mesh(1.6, 0.7, 5, 4);
+        let mut body = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+
+        // Offset up
+        for i in 0..body.num_verts {
+            body.pos[i * 2 + 1] += 8.0;
+            body.prev_pos[i * 2 + 1] += 8.0;
+        }
+
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+
+        // Run 5 seconds
+        for frame in 0..300 {
+            for _ in 0..8 {
+                body.substep(dt, -9.8, Some(ground_y));
+                body.apply_damping(0.01);
+            }
+
+            let ke = body.get_kinetic_energy();
+            assert!(
+                ke.is_finite() && ke < 1e5,
+                "Frame {}: star KE exploded: {}", frame, ke
+            );
+        }
+
+        println!("XPBD star mesh test passed");
+    }
+
+    /// Test blob mesh simulation stability
+    #[test]
+    fn test_xpbd_blob_mesh() {
+        use crate::mesh::create_blob_mesh;
+
+        let mesh = create_blob_mesh(1.4, 0.25, 16, 4, 42);
+        let mut body = XPBDSoftBody::new(
+            &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+        );
+
+        // Offset up
+        for i in 0..body.num_verts {
+            body.pos[i * 2 + 1] += 8.0;
+            body.prev_pos[i * 2 + 1] += 8.0;
+        }
+
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+
+        // Run 5 seconds
+        for frame in 0..300 {
+            for _ in 0..8 {
+                body.substep(dt, -9.8, Some(ground_y));
+                body.apply_damping(0.01);
+            }
+
+            let ke = body.get_kinetic_energy();
+            assert!(
+                ke.is_finite() && ke < 1e5,
+                "Frame {}: blob KE exploded: {}", frame, ke
+            );
+        }
+
+        println!("XPBD blob mesh test passed");
+    }
+
+    /// Test mixed shape collisions
+    #[test]
+    fn test_xpbd_mixed_shape_collision() {
+        use crate::mesh::{create_ellipse_mesh, create_star_mesh, create_blob_mesh};
+
+        // Create different shapes
+        let ring_mesh = create_ring_mesh(1.5, 1.0, 16, 4);
+        let ellipse_mesh = create_ellipse_mesh(2.0, 1.5, 16, 4);
+        let star_mesh = create_star_mesh(1.4, 0.6, 5, 4);
+        let blob_mesh = create_blob_mesh(1.3, 0.2, 16, 4, 123);
+
+        let meshes = [&ring_mesh, &ellipse_mesh, &star_mesh, &blob_mesh];
+        let offsets = [(0.0, 18.0), (-0.3, 14.0), (0.3, 10.0), (0.0, 6.0)];
+
+        let mut bodies: Vec<XPBDSoftBody> = Vec::new();
+        for (mesh, (x_off, y_off)) in meshes.iter().zip(offsets.iter()) {
+            let mut body = XPBDSoftBody::new(
+                &mesh.vertices, &mesh.triangles, 1100.0, 0.0, 1e-6
+            );
+            for i in 0..body.num_verts {
+                body.pos[i * 2] += x_off;
+                body.pos[i * 2 + 1] += y_off;
+                body.prev_pos[i * 2] += x_off;
+                body.prev_pos[i * 2 + 1] += y_off;
+            }
+            bodies.push(body);
+        }
+
+        let ground_y = -8.0;
+        let dt = 1.0 / 60.0 / 8.0;
+        let collision_dist = 0.25;
+
+        // Run 10 seconds
+        for frame in 0..600 {
+            for _ in 0..8 {
+                // Correct order: pre-solve → collisions → post-solve
+                for body in &mut bodies {
+                    body.substep_pre(dt, -9.8, Some(ground_y));
+                }
+
+                // Inter-body collisions
+                for i in 0..bodies.len() {
+                    for j in (i + 1)..bodies.len() {
+                        let (left, right) = bodies.split_at_mut(j);
+                        left[i].collide_with_body(&mut right[0], collision_dist);
+                    }
+                }
+
+                for body in &mut bodies {
+                    body.substep_post(dt);
+                    body.apply_damping(0.01);
+                }
+            }
+
+            for (idx, body) in bodies.iter().enumerate() {
+                let ke = body.get_kinetic_energy();
+                assert!(
+                    ke.is_finite() && ke < 1e5,
+                    "Frame {}, body {}: KE exploded: {}", frame, idx, ke
+                );
+            }
+        }
+
+        println!("XPBD mixed shape collision test passed!");
     }
 }

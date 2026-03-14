@@ -96,18 +96,18 @@ enum ShapeType {
 
 #[allow(dead_code)]
 fn create_xpbd_body(material: XPBDMaterial, x_offset: f32, y_offset: f32) -> XPBDSoftBody {
-    create_shaped_body(material, x_offset, y_offset, ShapeType::Ring).0
+    create_shaped_body(material, x_offset, y_offset, ShapeType::Ring, 1.0).0
 }
 
-fn create_shaped_body(material: XPBDMaterial, x_offset: f32, y_offset: f32, shape: ShapeType) -> (XPBDSoftBody, Vec<u32>) {
+fn create_shaped_body(material: XPBDMaterial, x_offset: f32, y_offset: f32, shape: ShapeType, scale: f32) -> (XPBDSoftBody, Vec<u32>) {
     use fem_core::mesh::{create_ellipse_mesh, create_star_mesh, create_blob_mesh};
 
-    // Create mesh based on shape type
+    // Create mesh based on shape type (base sizes, will be scaled)
     let mut mesh = match shape {
-        ShapeType::Ring => create_ring_mesh(OUTER_RADIUS, INNER_RADIUS, SEGMENTS, RADIAL_DIVISIONS),
-        ShapeType::Ellipse => create_ellipse_mesh(2.5, 1.8, SEGMENTS, RADIAL_DIVISIONS),
-        ShapeType::Star => create_star_mesh(1.6, 0.7, 5, RADIAL_DIVISIONS),
-        ShapeType::Blob(seed) => create_blob_mesh(1.4, 0.25, SEGMENTS, RADIAL_DIVISIONS, seed),
+        ShapeType::Ring => create_ring_mesh(OUTER_RADIUS * scale, INNER_RADIUS * scale, SEGMENTS, RADIAL_DIVISIONS),
+        ShapeType::Ellipse => create_ellipse_mesh(2.5 * scale, 1.8 * scale, SEGMENTS, RADIAL_DIVISIONS),
+        ShapeType::Star => create_star_mesh(1.6 * scale, 0.7 * scale, 5, RADIAL_DIVISIONS),
+        ShapeType::Blob(seed) => create_blob_mesh(1.4 * scale, 0.25, SEGMENTS, RADIAL_DIVISIONS, seed),
     };
 
     offset_vertices(&mut mesh.vertices, x_offset, y_offset);
@@ -200,41 +200,41 @@ impl Simulation {
         let mut bodies = Vec::with_capacity(20);
         let mut triangles = Vec::with_capacity(20);
 
-        // Mix of shapes on the ground
+        // Mix of shapes on the ground with varying sizes
         let ground_rest_y = GROUND_Y + OUTER_RADIUS + 0.1;
-        let shapes = [
-            ShapeType::Ring,
-            ShapeType::Star,
-            ShapeType::Ellipse,
-            ShapeType::Blob(42),
-            ShapeType::Ring,
+        let shapes_and_scales = [
+            (ShapeType::Ring, 0.8),
+            (ShapeType::Star, 1.2),
+            (ShapeType::Ellipse, 0.7),
+            (ShapeType::Blob(42), 1.0),
+            (ShapeType::Ring, 1.3),
         ];
-        for (i, &shape) in shapes.iter().enumerate() {
+        for (i, &(shape, scale)) in shapes_and_scales.iter().enumerate() {
             let x = -6.0 + (i as f32) * 3.0;
-            let (body, tris) = create_shaped_body(material, x, ground_rest_y, shape);
+            let (body, tris) = create_shaped_body(material, x, ground_rest_y, shape, scale);
             bodies.push(body);
             triangles.push(tris);
         }
 
-        // Falling bodies with mixed shapes
+        // Falling bodies with mixed shapes and sizes
         let drop_start = START_HEIGHT + 5.0;
         let vertical_spacing = 4.0;
         let horizontal_spacing = 3.5;
 
         let falling_shapes = [
-            ShapeType::Blob(1), ShapeType::Star, ShapeType::Ellipse, ShapeType::Ring,
-            ShapeType::Star, ShapeType::Blob(2), ShapeType::Ring, ShapeType::Ellipse,
-            ShapeType::Ellipse, ShapeType::Ring, ShapeType::Blob(3), ShapeType::Star,
-            ShapeType::Ring, ShapeType::Ellipse, ShapeType::Star, ShapeType::Blob(4),
+            (ShapeType::Blob(1), 0.7), (ShapeType::Star, 1.1), (ShapeType::Ellipse, 0.9), (ShapeType::Ring, 1.3),
+            (ShapeType::Star, 0.8), (ShapeType::Blob(2), 1.2), (ShapeType::Ring, 0.6), (ShapeType::Ellipse, 1.0),
+            (ShapeType::Ellipse, 1.1), (ShapeType::Ring, 0.9), (ShapeType::Blob(3), 0.8), (ShapeType::Star, 1.3),
+            (ShapeType::Ring, 1.0), (ShapeType::Ellipse, 0.7), (ShapeType::Star, 0.9), (ShapeType::Blob(4), 1.1),
         ];
 
-        for (i, &shape) in falling_shapes.iter().enumerate() {
+        for (i, &(shape, scale)) in falling_shapes.iter().enumerate() {
             let row = i / 4;
             let col = i % 4;
             let x = -5.25 + (col as f32) * horizontal_spacing;
             let y = drop_start + (row as f32) * vertical_spacing;
             let x_offset = ((row + col) % 3) as f32 * 0.3 - 0.3;
-            let (body, tris) = create_shaped_body(material, x + x_offset, y, shape);
+            let (body, tris) = create_shaped_body(material, x + x_offset, y, shape, scale);
             bodies.push(body);
             triangles.push(tris);
         }

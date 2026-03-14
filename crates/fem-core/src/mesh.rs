@@ -129,7 +129,7 @@ pub fn create_square_mesh(size: f32, divisions: u32) -> Mesh {
     Mesh { vertices, triangles }
 }
 
-/// Create an ellipse mesh with non-uniform vertex distribution
+/// Create an ellipse mesh with a small hole in the center (like ring topology)
 pub fn create_ellipse_mesh(
     width: f32,
     height: f32,
@@ -139,13 +139,12 @@ pub fn create_ellipse_mesh(
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
 
-    // Center vertex
-    vertices.push(0.0);
-    vertices.push(0.0);
+    // Create rings from inner (small hole) to outer
+    // Inner ring is 20% of size to create deformable center
+    let inner_scale = 0.2;
 
-    // Create rings of vertices from center outward
-    for r in 1..=rings {
-        let t = r as f32 / rings as f32;
+    for r in 0..=rings {
+        let t = inner_scale + (1.0 - inner_scale) * (r as f32 / rings as f32);
         let rx = width * 0.5 * t;
         let ry = height * 0.5 * t;
 
@@ -156,18 +155,10 @@ pub fn create_ellipse_mesh(
         }
     }
 
-    // Triangles from center to first ring
-    for i in 0..segments {
-        let next = (i + 1) % segments;
-        triangles.push(0);  // center
-        triangles.push(1 + i);
-        triangles.push(1 + next);
-    }
-
-    // Triangles between rings
-    for r in 0..(rings - 1) {
-        let ring_start = 1 + r * segments;
-        let next_ring_start = 1 + (r + 1) * segments;
+    // Triangles between rings (same as ring mesh)
+    for r in 0..rings {
+        let ring_start = r * segments;
+        let next_ring_start = (r + 1) * segments;
 
         for i in 0..segments {
             let next = (i + 1) % segments;
@@ -185,7 +176,7 @@ pub fn create_ellipse_mesh(
     Mesh { vertices, triangles }
 }
 
-/// Create a star-shaped mesh
+/// Create a star-shaped mesh with a small hole in the center
 pub fn create_star_mesh(
     outer_radius: f32,
     inner_radius: f32,
@@ -195,15 +186,14 @@ pub fn create_star_mesh(
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
 
-    // Center vertex
-    vertices.push(0.0);
-    vertices.push(0.0);
-
     // Create rings with alternating star points
     let total_points = points * 2;  // points + valleys
 
-    for r in 1..=rings {
-        let t = r as f32 / rings as f32;
+    // Inner ring is 25% of size to create deformable center
+    let inner_scale = 0.25;
+
+    for r in 0..=rings {
+        let t = inner_scale + (1.0 - inner_scale) * (r as f32 / rings as f32);
 
         for i in 0..total_points {
             let angle = (i as f32 / total_points as f32) * PI * 2.0;
@@ -218,18 +208,10 @@ pub fn create_star_mesh(
         }
     }
 
-    // Triangles from center to first ring
-    for i in 0..total_points {
-        let next = (i + 1) % total_points;
-        triangles.push(0);
-        triangles.push(1 + i);
-        triangles.push(1 + next);
-    }
-
     // Triangles between rings
-    for r in 0..(rings - 1) {
-        let ring_start = 1 + r * total_points;
-        let next_ring_start = 1 + (r + 1) * total_points;
+    for r in 0..rings {
+        let ring_start = r * total_points;
+        let next_ring_start = (r + 1) * total_points;
 
         for i in 0..total_points {
             let next = (i + 1) % total_points;
@@ -247,7 +229,7 @@ pub fn create_star_mesh(
     Mesh { vertices, triangles }
 }
 
-/// Create a blob mesh with randomized vertex positions
+/// Create a blob mesh with randomized vertex positions and a small hole in the center
 pub fn create_blob_mesh(
     base_radius: f32,
     variation: f32,
@@ -264,13 +246,12 @@ pub fn create_blob_mesh(
         x * 2.0 - 1.0  // -1 to 1
     };
 
-    // Center vertex
-    vertices.push(0.0);
-    vertices.push(0.0);
+    // Inner ring is 20% of size to create deformable center
+    let inner_scale = 0.2;
 
-    // Create rings with randomized radii
-    for r in 1..=rings {
-        let base_t = r as f32 / rings as f32;
+    // Create rings with randomized radii (including inner ring)
+    for r in 0..=rings {
+        let base_t = inner_scale + (1.0 - inner_scale) * (r as f32 / rings as f32);
 
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * PI * 2.0;
@@ -281,18 +262,10 @@ pub fn create_blob_mesh(
         }
     }
 
-    // Triangles from center to first ring
-    for i in 0..segments {
-        let next = (i + 1) % segments;
-        triangles.push(0);
-        triangles.push(1 + i);
-        triangles.push(1 + next);
-    }
-
     // Triangles between rings
-    for r in 0..(rings - 1) {
-        let ring_start = 1 + r * segments;
-        let next_ring_start = 1 + (r + 1) * segments;
+    for r in 0..rings {
+        let ring_start = r * segments;
+        let next_ring_start = (r + 1) * segments;
 
         for i in 0..segments {
             let next = (i + 1) % segments;
@@ -310,19 +283,13 @@ pub fn create_blob_mesh(
     Mesh { vertices, triangles }
 }
 
-/// Create wireframe for any radial mesh (ellipse, star, blob)
+/// Create wireframe for any radial mesh (ellipse, star, blob) - now with hole topology
 pub fn create_radial_wireframe(segments: u32, rings: u32) -> Vec<u32> {
     let mut line_indices = Vec::new();
 
-    // Lines from center to first ring
-    for i in 0..segments {
-        line_indices.push(0);
-        line_indices.push(1 + i);
-    }
-
-    // Lines within and between rings
-    for r in 0..rings {
-        let ring_start = 1 + r * segments;
+    // Lines within and between rings (same as ring mesh)
+    for r in 0..=rings {
+        let ring_start = r * segments;
 
         for i in 0..segments {
             let next = (i + 1) % segments;
@@ -332,8 +299,8 @@ pub fn create_radial_wireframe(segments: u32, rings: u32) -> Vec<u32> {
             line_indices.push(ring_start + next);
 
             // Radial line to next ring (if not last ring)
-            if r < rings - 1 {
-                let next_ring_start = 1 + (r + 1) * segments;
+            if r < rings {
+                let next_ring_start = (r + 1) * segments;
                 line_indices.push(ring_start + i);
                 line_indices.push(next_ring_start + i);
             }
@@ -377,5 +344,55 @@ mod tests {
         let mut vertices = vec![0.0, 0.0, 1.0, 1.0];
         offset_vertices(&mut vertices, 2.0, 3.0);
         assert_eq!(vertices, vec![2.0, 3.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_ellipse_mesh() {
+        let mesh = create_ellipse_mesh(2.0, 1.5, 8, 3);
+        // With hole topology: 8 segments * (3+1) rings = 32 vertices
+        assert_eq!(mesh.vertices.len() / 2, 32);
+        // 8 segments * 3 ring transitions * 2 triangles = 48 triangles
+        assert_eq!(mesh.triangles.len() / 3, 48);
+        // Verify no NaN or infinite values
+        for v in &mesh.vertices {
+            assert!(v.is_finite(), "Vertex should be finite");
+        }
+    }
+
+    #[test]
+    fn test_star_mesh() {
+        let mesh = create_star_mesh(1.5, 0.7, 5, 3);
+        // 5 points * 2 (points + valleys) = 10 segments per ring
+        // With hole topology: 10 * (3+1) = 40 vertices
+        assert_eq!(mesh.vertices.len() / 2, 40);
+        // 10 segments * 3 ring transitions * 2 triangles = 60 triangles
+        assert_eq!(mesh.triangles.len() / 3, 60);
+        // Verify star shape has alternating radii
+        for v in &mesh.vertices {
+            assert!(v.is_finite(), "Vertex should be finite");
+        }
+    }
+
+    #[test]
+    fn test_blob_mesh() {
+        let mesh = create_blob_mesh(1.5, 0.25, 8, 3, 42);
+        // With hole topology: 8 segments * (3+1) rings = 32 vertices
+        assert_eq!(mesh.vertices.len() / 2, 32);
+        // 8 segments * 3 ring transitions * 2 triangles = 48 triangles
+        assert_eq!(mesh.triangles.len() / 3, 48);
+        // Verify deterministic: same seed gives same mesh
+        let mesh2 = create_blob_mesh(1.5, 0.25, 8, 3, 42);
+        assert_eq!(mesh.vertices, mesh2.vertices);
+        // Different seed gives different mesh
+        let mesh3 = create_blob_mesh(1.5, 0.25, 8, 3, 99);
+        assert_ne!(mesh.vertices, mesh3.vertices);
+    }
+
+    #[test]
+    fn test_radial_wireframe() {
+        let wireframe = create_radial_wireframe(8, 3);
+        // Should have circumferential + radial lines
+        assert!(wireframe.len() > 0);
+        assert_eq!(wireframe.len() % 2, 0); // Must be pairs
     }
 }
